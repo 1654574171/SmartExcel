@@ -133,6 +133,43 @@ if (bridgeSource.indexOf('state.cells') < 0 || bridgeSource.indexOf('-4142') < 0
 if (appSource.indexOf('History.preview') < 0 || appSource.indexOf('canUndo') < 0) {
   errors.push('界面未提前提示不可撤回的计划，或仍对不可撤回事务显示撤回按钮');
 }
+/* 颜色类动作撤回不得把整片区域的字体色重写成兜底色 */
+if (/String\(color \|\| ''\)/.test(bridgeSource)) {
+  errors.push('颜色规范化仍把数值 0（自动色）当成空值，撤回会把字体色写成兜底浅黄');
+}
+if (actionsSource.indexOf('affectedProps:') < 0 || bridgeSource.indexOf('state.props') < 0 ||
+    historySource.indexOf('Actions.affectedProps') < 0) {
+  errors.push('撤回快照缺少属性级恢复，颜色动作会顺带重写整片区域字体色');
+}
+/* 高频任务能力必须四处齐备：白名单、桥接实现、规则分支、大模型 schema */
+const highFreq = ['et.findReplace', 'et.fillBlanks', 'et.fillDown', 'et.mergeCells',
+  'et.insertRows', 'et.insertColumns', 'et.deleteColumns', 'et.hideColumns',
+  'et.dataValidation', 'et.pageSetup', 'et.conditionalFormatRule',
+  'et.pivotTable', 'et.textToColumns'];
+highFreq.forEach((t) => {
+  const method = t.replace('et.', '') + ':';
+  if (actionsSource.indexOf("'" + t + "'") < 0 || bridgeSource.indexOf(method) < 0 ||
+      plannerSource.indexOf("'" + t + "'") < 0 || actionsSource.indexOf(t + ' {') < 0) {
+    errors.push('高频动作未同时接入白名单 / 桥接层 / 规则引擎 / 大模型 schema：' + t);
+  }
+});
+if (plannerSource.indexOf('fmt.push') < 0) {
+  errors.push('一句话里的多个格式意图仍需可叠加输出');
+}
+if (advisorSource.indexOf("case 'sumifs'") < 0 || advisorSource.indexOf("case 'trim'") < 0 ||
+    advisorSource.indexOf("case 'iferror'") < 0) {
+  errors.push('高频公式类型（多条件 / 文本清洗 / 错误值）未补齐');
+}
+if (plannerSource.indexOf('@lookupRange') < 0) {
+  errors.push('缺少占位公式写入拦截，错误公式会落到单元格里');
+}
+/* 新动作的参数必须能通过 validate 白名单，否则计划生成了但执行时参数丢失 */
+if (!/'find', 'replace', 'delimiter'/.test(actionsSource)) {
+  errors.push('动作校验白名单缺少分列分隔符，分列会退化成默认分隔符');
+}
+if (plannerSource.indexOf("advice.intentKind === 'sumifs'") < 0) {
+  errors.push('缺少多条件公式的区域校验，凭选区推断的 SUMIFS 会写进单元格');
+}
 
 const ribbon = read('addon/ribbon.xml');
 if (!/onAction="OnAction"/.test(ribbon)) { errors.push('ribbon.xml 缺少 OnAction 回调'); }

@@ -20,7 +20,16 @@
     'et.renameSheet': '重命名工作表',
     'et.insertChart': '插入图表',
     'et.freeze': '冻结窗格',
-    'et.autoFilter': '添加筛选'
+    'et.autoFilter': '添加筛选',
+    'et.mergeCells': '合并单元格',
+    'et.insertRows': '插入行',
+    'et.insertColumns': '插入列',
+    'et.deleteColumns': '删除列',
+    'et.hideColumns': '隐藏列',
+    'et.dataValidation': '设置下拉选项',
+    'et.pageSetup': '打印区域设置',
+    'et.conditionalFormatRule': '条件格式规则',
+    'et.pivotTable': '数据透视表'
   };
 
   function uid() {
@@ -101,7 +110,8 @@
     }
     try {
       var addrs = rangesOf(plan);
-      for (var k = 0; k < addrs.length; k++) { before.ranges.push(Bridge.et.getState(addrs[k])); }
+      var props = Actions.affectedProps(plan);
+      for (var k = 0; k < addrs.length; k++) { before.ranges.push(Bridge.et.getState(addrs[k], props)); }
       if (!before.ranges.length) {
         before.undoable = false;
         before.reason = '计划未指定受影响区域，无法自动撤回，请用表格的 Ctrl+Z';
@@ -136,7 +146,7 @@
   function snapshotFrom(before) {
     var snap = { app: 'et', ranges: [] };
     for (var i = 0; i < before.ranges.length; i++) {
-      snap.ranges.push(Bridge.et.getState(before.ranges[i].address));
+      snap.ranges.push(Bridge.et.getState(before.ranges[i].address, before.ranges[i].props));
     }
     return snap;
   }

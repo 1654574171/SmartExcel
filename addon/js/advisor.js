@@ -18,6 +18,9 @@
     datedif: '计算两个日期相差的天数', conditionalFormat: '给满足条件的单元格设置条件格式',
     multiIf: '按多个区域的条件逐行判断并给出标记',
     dedup: '标记重复数据 / 提取唯一值',
+    iferror: '把公式报错显示成空值', sumifs: '按多个条件求和', countifs: '按多个条件计数',
+    trim: '去掉文本首尾多余空格', left: '截取文本左侧若干字符', mid: '从文本中间截取字符',
+    text: '按指定格式转成文本',
     direct: '整理你给出的公式'
   };
 
@@ -61,9 +64,9 @@
   /* 引用可以是 A2:A6，也可以是 员工信息!B2:B6 / '员工 信息'!B2:B6 */
   function splitRef(ref) {
     var s = String(ref || '').replace(/\$/g, '');
-    var m = /^('(?:[^']|'')+'|[A-Za-z0-9_\u4e00-\u9fa5]+)!(.+)$/.exec(s);
+    var m = /^(\[[^\]]+\])?('(?:[^']|'')+'|[A-Za-z0-9_\u4e00-\u9fa5]+)!(.+)$/.exec(s);
     if (!m) { return { sheet: '', addr: s }; }
-    return { sheet: m[1], addr: m[2] };
+    return { sheet: (m[1] || '') + m[2], addr: m[3] };
   }
 
   function addrOf(ref) { return splitRef(ref).addr.toUpperCase(); }
@@ -106,7 +109,7 @@
     var found = [], m;
     var source = String(text || '');
     var masked = source;
-    var qualified = /(?:'(?:[^']|'')+'|[A-Za-z0-9_\u4e00-\u9fa5]+)!\$?[A-Z]{1,3}\$?\d{1,7}(?::\$?[A-Z]{1,3}\$?\d{1,7})?/gi;
+    var qualified = /(?:\[[^\]]+\])?(?:'(?:[^']|'')+'|[A-Za-z0-9_\u4e00-\u9fa5]+)!\$?[A-Z]{1,3}\$?\d{1,7}(?::\$?[A-Z]{1,3}\$?\d{1,7})?/gi;
     while ((m = qualified.exec(masked)) !== null) {
       var part = splitRef(m[0]);
       found.push({ ref: part.sheet + '!' + part.addr.toUpperCase(), at: m.index });
@@ -174,21 +177,35 @@
 
   function detectKind(text) {
     if (directFormula(text)) { return 'direct'; }
+    /* 错误值处理优先于查找匹配，否则「查不到显示为空」会退化成臆造查找表 */
+    if (/IFERROR|错误值|查不到|屏蔽错误|报错.*空/i.test(text)) { return 'iferror'; }
     if (/占比|占比率|所占比例|比例/.test(text)) { return 'ratio'; }
     if (/增长率|同比|环比|增幅/.test(text)) { return 'growth'; }
     if (/排名|名次|RANK/i.test(text)) { return 'rank'; }
+    if (/多条件求和|多个条件.*求和|SUMIFS/i.test(text)) { return 'sumifs'; }
+    if (/多条件计数|多个条件.*计数|COUNTIFS/i.test(text)) { return 'countifs'; }
     if (/条件求和|按.+求和|分类汇总|SUMIF/i.test(text)) { return 'sumif'; }
     if (/条件平均|按.+平均|AVERAGEIF/i.test(text)) { return 'averageif'; }
+    if (/TRIM|去掉.*空格|去除.*空格|删掉.*空格|去空格/i.test(text)) { return 'trim'; }
+    if (/LEFT|取.*前\s*\d+\s*位|前\s*\d+\s*位|左侧\s*\d+\s*个/i.test(text)) { return 'left'; }
+    if (/MID|从第\s*\d+\s*位取/i.test(text)) { return 'mid'; }
+    if (/TEXT函数|转成文本|格式化为文本/i.test(text)) { return 'text'; }
+    /* 「非空」必须抢在「多少个」之前，否则会生成 COUNTIF(...,"") */
+    if (/非空|COUNTA/i.test(text)) { return 'counta'; }
     if (/条件计数|有几个|多少个|多少条|COUNTIF/i.test(text)) { return 'countif'; }
     if (/去重|删除重复|去除重复|重复行|不重复|唯一值|UNIQUE/i.test(text)) { return 'dedup'; }
     if (/条件格式/.test(text)) { return 'conditionalFormat'; }
     if (/标黄|标红|标绿|高亮|底色|填充色|涂色/.test(text)) { return 'conditionalFormat'; }
-    if (/查找匹配|带出|匹配过来|VLOOKUP|LOOKUP/i.test(text)) { return 'vlookup'; }
+    if (/拼接|合并文本|文本合并|连起来|CONCAT/i.test(text) && !/合并单元格/.test(text)) { return 'concat'; }
+    if (/查找匹配|带出|匹配过来|查找|VLOOKUP|LOOKUP/i.test(text)) { return 'vlookup'; }
     if (/相差.*天|日期差|间隔天数|DATEDIF/i.test(text)) { return 'datedif'; }
-    if (/拼接|合并文本|连起来|CONCAT/i.test(text)) { return 'concat'; }
+    if (/拼接|合并|连起来/.test(text) &&
+        !/合并单元格|合并\s*\$?[A-Z]{1,3}\$?\d/.test(text)) { return 'concat'; }
     if (/如果|条件判断|达标|不及格|IF函数/i.test(text)) { return 'if'; }
     if (/四舍五入|保留\s*\d+\s*位|\d+\s*位小数|ROUND/i.test(text)) { return 'round'; }
-    if (/非空|COUNTA/i.test(text)) { return 'counta'; }
+    /* 带数值阈值又问「个数」时必须是条件计数，不能退化成 COUNT 丢掉条件 */
+    if (/(?:大于|超过|高于|小于|低于|不足|等于|不等于|>=|<=|≥|≤|>|<)\s*\d/.test(text) &&
+        /个数|几个|数量|计数|统计/.test(text)) { return 'countif'; }
     if (/计数|个数|数量|COUNT/i.test(text)) { return 'count'; }
     if (/平均|均值|AVERAGE/i.test(text)) { return 'average'; }
     if (/最大|最大值|MAX/i.test(text)) { return 'max'; }
@@ -198,7 +215,7 @@
   }
 
   function targetOf(text, range) {
-    var m = /(?:放到|放在|写入|写到|填到|结果放在|输出到|存到)\s*((?:'[^']+'|[A-Za-z0-9_\u4e00-\u9fa5]+)!)?\$?([A-Z]{1,3})\$?(\d{1,7})/i.exec(text);
+    var m = /(?:放到|放在|写入|写到|填到|合并到|拼接到|连接到|结果放在|输出到|存到)\s*((?:'[^']+'|[A-Za-z0-9_\u4e00-\u9fa5]+)!)?\$?([A-Z]{1,3})\$?(\d{1,7})/i.exec(text);
     if (m) { return (m[1] || '') + m[2].toUpperCase() + m[3]; }
     if (/下方|下面|下一行|末行|底部/.test(text)) {
       return sheetPrefixOf(range) + colOf(range) + (boundsOf(range).last + 1);
@@ -281,9 +298,9 @@
       case 'averageif': return [formulaItem('条件平均', '=AVERAGEIF(' + o.condRange + ',"' + (o.condText || '条件') + '",' + o.sumRange + ')',
         '只对满足条件的行计算平均值。')];
       case 'if': {
-        /* 返回值来自指令里的「是否为 X / 标记为 X / 标为 X」，不再写死达标文案 */
-        var yesText = o.resultText || '满足条件';
-        var noText = o.resultText ? '非' + o.resultText : '不满足条件';
+        /* 返回值优先用「显示 X / 否则显示 Y」，其次才是「标为 X」 */
+        var yesText = o.yesText || o.resultText || '满足条件';
+        var noText = o.noText || (o.resultText ? '非' + o.resultText : '不满足条件');
         return [formulaItem('条件判断', '=IF(' + first + cond + ',"' + yesText + '","' + noText + '")',
           '条件与返回值都按你的指令生成；缺阈值时先把 ' + first + ' 后面的比较条件补全。')];
       }
@@ -292,21 +309,55 @@
       case 'concat': return [formulaItem('文本拼接', '=' + first + '&" "&' + neighbour,
         '用 & 连接文本，中间加了空格分隔。')];
       case 'vlookup': {
-        /* 查找表取当前工作簿里真实存在的另一张工作表，未取到才用占位名 */
-        var lookupName = '';
-        try {
-          var names = Bridge.et.sheetNames ? Bridge.et.sheetNames() : [];
-          for (var ni = 0; ni < names.length; ni++) {
-            if (names[ni] !== o.env.sheetName) { lookupName = names[ni]; break; }
-          }
-        } catch (e) { /* 保持占位 */ }
-        var lookupRef = quoteSheet(lookupName || '查找表') + '!$A:$B';
-        return [formulaItem('查找匹配', '=VLOOKUP(' + first + ',' + lookupRef + ',2,0)',
-          '在查找表首列找 ' + first + '，返回第 2 列；0 表示精确匹配。',
+        /* 查找区域优先取指令里给出的跨表引用；没有才用真实工作表清单，绝不臆造表名 */
+        var lookupRef = '', keyRef = '';
+        /* 关键字取指令里第一个本表引用，不能把「放到 B2」的结果位置当成查找关键字 */
+        for (var vi = 0; vi < o.ranges.length; vi++) {
+          if (sheetPrefixOf(o.ranges[vi]) && !lookupRef) { lookupRef = o.ranges[vi]; }
+          else if (!sheetPrefixOf(o.ranges[vi]) && !keyRef) { keyRef = o.ranges[vi]; }
+        }
+        if (!keyRef) { keyRef = o.range; }
+        if (!lookupRef) {
+          try {
+            var names = Bridge.et.sheetNames ? Bridge.et.sheetNames() : [];
+            for (var ni = 0; ni < names.length; ni++) {
+              if (names[ni] !== o.env.sheetName) {
+                lookupRef = quoteSheet(names[ni]) + '!$A:$B';
+                break;
+              }
+            }
+          } catch (e) { /* 保持为空 */ }
+        }
+        if (!lookupRef) { lookupRef = '@lookupRange'; }
+        var keyCell = sheetPrefixOf(keyRef) + colOf(keyRef) + boundsOf(keyRef).first;
+        return [formulaItem('查找匹配', '=VLOOKUP(' + keyCell + ',' + lookupRef + ',2,0)',
+          '在查找区域首列找 ' + keyCell + '，返回第 2 列；0 表示精确匹配。',
           '请把 ' + lookupRef + ' 换成实际的查找表区域。')];
       }
       case 'datedif': return [formulaItem('日期差', '=DATEDIF(' + first + ',' + neighbour + ',"D")',
         '"D" 返回天数，也可用 "M"（月）或 "Y"（年）。')];
+      case 'iferror': return [formulaItem('屏蔽错误值',
+        '=IFERROR(' + (o.innerFormula || 'VLOOKUP(' + first + ',@lookupRange,2,0)') + ',"")',
+        '把原公式包在 IFERROR 里，出错时返回空文本；可把 "" 换成提示文字。',
+        '请把 @lookupRange 换成实际查找区域，或把整段替换为你自己的公式。')];
+      case 'trim': return [formulaItem('去除多余空格', '=TRIM(' + first + ')',
+        'TRIM 去掉首尾空格，并把中间连续空格压成一个。')];
+      case 'left': return [formulaItem('取左侧字符', '=LEFT(' + first + ',' + o.takeLen + ')',
+        '从文本左侧取指定个数的字符。')];
+      case 'mid': return [formulaItem('取中间字符', '=MID(' + first + ',' + o.fromPos + ',' + o.takeLen + ')',
+        '从第 N 个字符开始取指定长度。')];
+      case 'text': return [formulaItem('格式化为文本', '=TEXT(' + first + ',"' + o.textFormat + '")',
+        '把数值或日期按指定格式转成文本，如 yyyy-mm-dd、0.00%。')];
+      case 'sumifs': return [formulaItem('多条件求和',
+        '=SUMIFS(' + o.sumRange + ',' + o.condRange + ',"' + (o.condText || '条件1') + '",' +
+        o.condRange2 + ',"' + (o.condText2 || '条件2') + '")',
+        '第一个参数是求和列，之后成对给出「条件区域, 条件」。',
+        '请把「条件1 / 条件2」换成实际分类或单元格引用，并核对条件区域。')];
+      case 'countifs': return [formulaItem('多条件计数',
+        '=COUNTIFS(' + o.condRange + ',"' + (o.condText || '条件1') + '",' +
+        o.condRange2 + ',"' + (o.condText2 || '条件2') + '")',
+        '每一对「条件区域, 条件」都必须同时满足才计数。',
+        '请把「条件1 / 条件2」换成实际分类或单元格引用。')];
       case 'conditionalFormat': return [formulaItem('条件格式公式', '=' + first + cond,
         '这不是写在单元格里的公式：在「条件格式 → 新建规则 → 使用公式」中填入，再设置填充色。',
         '公式相对所选区域的左上角单元格书写，应用到整个区域时会自动偏移。')];
@@ -429,15 +480,42 @@
       /标为([^，,。;；且并或\s]{1,12})/.exec(raw);
     var resultText = labelMatch ? labelMatch[1].trim() : '';
     var connector = /或者|或/.test(raw) ? 'or' : 'and';
+    /* 「显示及格，否则显示不及格」这类返回值也要进公式，不能套默认文案 */
+    var showYes = /(?:显示|返回|写成|则为|输出为)\s*["'「『]?([^"'」』\s,，。;；]{1,12})/.exec(raw);
+    var showNo = /(?:否则|不然|不满足时)\s*(?:显示|返回|写成|为|是|输出为)?\s*["'「『]?([^"'」』\s,，。;；]{1,12})/.exec(raw);
+    /* 条件文本优先取引号，其次取「中华东对应」「为销售」这类中文写法 */
+    var criterionText = quoted(raw);
+    if (!criterionText) {
+      /* 非贪婪，避免把「对应」「且」等连接词一起吞进条件文本 */
+      var cm = /(?:中|里|为|等于|是|按)\s*["'「『]?([^"'」』\s,，。;；:：]{1,16}?)["'」』]?\s*(?:对应|的|记录|数据|且|并且|，|,)/.exec(raw);
+      if (cm) { criterionText = cm[1]; }
+    }
+    var condText2 = '';
+    var cm2 = /(?:且|并且|同时|以及)[^,，。;；]*?(大于|小于|等于|不小于|不大于)\s*(\d+(?:\.\d+)?)/.exec(raw);
+    if (cm2) {
+      var op2 = { '大于': '>', '小于': '<', '等于': '=', '不小于': '>=', '不大于': '<=' }[cm2[1]] || '>';
+      condText2 = op2 + cm2[2];
+    }
+    var takeMatch = /前\s*(\d{1,3})\s*位|左侧\s*(\d{1,3})\s*个|取\s*(\d{1,3})\s*个/.exec(raw);
+    var fromMatch = /从第\s*(\d{1,3})\s*位/.exec(raw);
+    var fmtMatch = /["']([a-zA-Z0-9#%.,\-/]{2,20})["']/.exec(raw);
 
     var rangePrefix = sheetPrefixOf(range);
+    var nextCondCol = Util.numToCol(Util.colToNum(condCol) + 1);
     var o = {
       range: range, env: env, cond: cond, target: target, rangeGuessed: rangeGuessed,
       direct: direct || '',
       digits: digits ? Math.min(6, Number(digits[1] || digits[2])) : 2,
       condRange: rangePrefix + condCol + b.first + ':' + condCol + b.last,
+      condRange2: rangePrefix + nextCondCol + b.first + ':' + nextCondCol + b.last,
       sumRange: rangePrefix + sumCol + b.first + ':' + sumCol + b.last,
-      condText: quoted(raw),
+      condText: criterionText, condText2: condText2,
+      yesText: showYes ? showYes[1].trim() : '',
+      noText: showNo ? showNo[1].trim() : '',
+      takeLen: takeMatch ? Number(takeMatch[1] || takeMatch[2] || takeMatch[3]) : 6,
+      fromPos: fromMatch ? Number(fromMatch[1]) : 7,
+      textFormat: fmtMatch ? fmtMatch[1] : 'yyyy-mm-dd',
+      innerFormula: direct || '',
       ranges: ranges, conditions: conditions,
       connector: connector, resultText: resultText
     };

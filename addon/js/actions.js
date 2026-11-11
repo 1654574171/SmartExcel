@@ -36,7 +36,20 @@
     'et.clear': { app: 'et', risk: 'danger', label: '清空区域' },
     'et.deleteRows': { app: 'et', risk: 'danger', label: '删除行' },
     'et.deleteDuplicateRows': { app: 'et', risk: 'danger', label: '按内容去重删除行' },
-    'et.deleteRowsIf': { app: 'et', risk: 'danger', label: '按条件删除行' }
+    'et.deleteRowsIf': { app: 'et', risk: 'danger', label: '按条件删除行' },
+    'et.findReplace': { app: 'et', risk: 'write', label: '查找替换' },
+    'et.fillBlanks': { app: 'et', risk: 'write', label: '填充空白单元格' },
+    'et.fillDown': { app: 'et', risk: 'write', label: '公式向下填充' },
+    'et.mergeCells': { app: 'et', risk: 'danger', label: '合并单元格' },
+    'et.insertRows': { app: 'et', risk: 'danger', label: '插入行' },
+    'et.insertColumns': { app: 'et', risk: 'danger', label: '插入列' },
+    'et.deleteColumns': { app: 'et', risk: 'danger', label: '删除列' },
+    'et.hideColumns': { app: 'et', risk: 'danger', label: '隐藏 / 显示列' },
+    'et.dataValidation': { app: 'et', risk: 'write', label: '设置下拉选项' },
+    'et.pageSetup': { app: 'et', risk: 'write', label: '打印区域设置' },
+    'et.conditionalFormatRule': { app: 'et', risk: 'write', label: '条件格式规则' },
+    'et.pivotTable': { app: 'et', risk: 'danger', label: '数据透视表' },
+    'et.textToColumns': { app: 'et', risk: 'write', label: '按分隔符分列' }
   };
 
   var TYPE_SCHEMA = [
@@ -56,7 +69,7 @@
     'et.columnWidth {range, width:number}',
     'et.autoFit {range} 自适应列宽',
     'et.conditionalFill {range, op:">"|">="|"<"|"<="|"="|"!="|"contains", threshold:number|string, color, fontColor?, fillScope:"cell"|"row"} 只给满足条件的单元格或整行上色，文本条件如 threshold:"是"',
-    'et.sort {range, order:"asc"|"desc"}',
+    'et.sort {range, order:"asc"|"desc", columns?:["A","C"]} 按指定列 / 多关键字排序',
     'et.autoFilter {range}',
     'et.freeze {range} 冻结窗格',
     'et.insertChart {range, chartType:"column"|"line"}',
@@ -67,7 +80,20 @@
     'et.clear {range, what:"contents"|"formats"|"all"}',
     'et.deleteRows {range} 删除指定区域所在的整行',
     'et.deleteDuplicateRows {range, keyColumn?, keep:"first"|"last"} 按内容删除重复行；用户明确要求去重 / 删除重复行时直接使用，不要因为破坏性就返回空 actions',
-    'et.deleteRowsIf {range, op:"="|"!="|">"|">="|"<"|"<="|"contains", value:number|string, keyColumn?} 按条件删除整行，如把 D2:D6 中内容为「是」的行删除'
+    'et.deleteRowsIf {range, op:"="|"!="|">"|">="|"<"|"<="|"contains", value:number|string, keyColumn?} 按条件删除整行，如把 D2:D6 中内容为「是」的行删除',
+    'et.findReplace {range, find, replace} 把区域内的文本替换成新文本，公式单元格不动',
+    'et.fillBlanks {range, value} 只给区域内的空白单元格填值',
+    'et.fillDown {range} 把区域首行的公式向下填充到其余行',
+    'et.mergeCells {range, center?:true|false} 合并单元格，可同时居中',
+    'et.insertRows {range, count?:number} 在指定位置插入整行',
+    'et.insertColumns {range, count?:number} 插入整列',
+    'et.deleteColumns {range} 删除整列',
+    'et.hideColumns {range, hidden:true|false} 隐藏或取消隐藏列',
+    'et.dataValidation {range, list:["是","否"]} 设置下拉选项',
+    'et.pageSetup {range, titleRows?} 设置打印区域 / 打印标题行',
+    'et.conditionalFormatRule {range, formula, color} 新建条件格式规则，如隔行底纹 =MOD(ROW(A1),2)=0',
+    'et.pivotTable {range, target} 基于区域创建数据透视表',
+    'et.textToColumns {range, delimiter} 按分隔符把一列拆成多列，如按逗号分列'
   ];
 
   function safeRange(range) {
@@ -95,7 +121,8 @@
       case 'et.autoFit': return '让 ' + r + ' 列宽自适应';
       case 'et.conditionalFill': return '只把 ' + r + ' 中「' + a.op + ' ' + a.threshold + '」' +
         (a.fillScope === 'row' ? '的单元格所在整行' : '的单元格') + '标为 ' + a.color + '，其余单元格不动';
-      case 'et.sort': return '对 ' + r + (a.order === 'desc' ? ' 降序' : ' 升序') + '排序';
+      case 'et.sort': return '对 ' + r + (a.order === 'desc' ? ' 降序' : ' 升序') + '排序' +
+        (a.columns && a.columns.length ? '（按 ' + a.columns.join('、') + ' 列）' : '') + '；整行数据会一起重排';
       case 'et.autoFilter': return '为 ' + r + ' 添加筛选';
       case 'et.freeze': return '按 ' + r + ' 冻结窗格';
       case 'et.insertChart': return '基于 ' + r + ' 插入' + (a.chartType === 'line' ? '折线图' : '柱状图');
@@ -111,7 +138,22 @@
       case 'et.deleteRowsIf': return '删除 ' + r + ' 中「' + a.op + ' ' + a.value + '」' +
         (a.keyColumn ? '（按 ' + a.keyColumn + ' 列判断）' : '') +
         '的单元格所在整行；会删除整行，影响范围外的列也会随之上移';
-      default: return '未知操作 ' + a.type;
+      case 'et.findReplace': return '把 ' + r + ' 中的「' + a.find + '」替换为「' + a.replace + '」（公式单元格不动）';
+      case 'et.fillBlanks': return '把 ' + r + ' 中的空白单元格填为「' + a.value + '」，有内容的单元格不动';
+      case 'et.fillDown': return '把 ' + r + ' 首行的公式向下填充到其余行';
+      case 'et.mergeCells': return '合并 ' + r + (a.center ? ' 并居中' : '') + '；只保留左上角单元格的内容';
+      case 'et.insertRows': return '在 ' + r + ' 处插入 ' + (a.count || 1) + ' 行，下方数据会下移';
+      case 'et.insertColumns': return '在 ' + r + ' 处插入 ' + (a.count || 1) + ' 列，右侧数据会右移';
+      case 'et.deleteColumns': return '删除 ' + r + ' 所在的整列，右侧数据会左移';
+      case 'et.hideColumns': return (a.hidden === false ? '取消隐藏 ' : '隐藏 ') + r + ' 所在的列';
+      case 'et.dataValidation': return '给 ' + r + ' 设置下拉选项：' + ((a.list || []).join('、') || '（未给出选项）');
+      case 'et.pageSetup': return '把 ' + r + ' 设为打印区域' + (a.titleRows ? '，并打印标题行 ' + a.titleRows : '');
+      case 'et.conditionalFormatRule': return '给 ' + r + ' 新建条件格式规则 ' + a.formula + '，命中显示 ' + a.color;
+      case 'et.pivotTable': return '基于 ' + r + ' 创建数据透视表，放在 ' + safeRange(a.target);
+      default: {
+        var extraMeta = META[a.type];
+        return extraMeta ? extraMeta.label + '：' + r : '未知操作 ' + a.type;
+      }
     }
   }
 
@@ -144,9 +186,9 @@
         if (!META[a.type]) { out.warnings.push('已忽略不支持的操作：' + a.type); continue; }
         var clean = { type: a.type };
         var keys = ['range', 'target', 'color', 'fontColor', 'formula', 'value', 'text', 'name', 'size',
-          'format', 'align', 'width', 'op', 'threshold', 'find', 'replace', 'rows', 'cols', 'data',
+          'format', 'align', 'width', 'op', 'threshold', 'find', 'replace', 'delimiter', 'rows', 'cols', 'data',
           'what', 'order', 'chartType', 'start', 'step', 'position', 'level', 'topic', 'draft', 'items', 'bold', 'italic',
-          'keyColumn', 'keep', 'fillScope'];
+          'keyColumn', 'keep', 'fillScope', 'count', 'center', 'hidden', 'columns', 'list', 'titleRows'];
         for (var k = 0; k < keys.length; k++) {
           if (a[keys[k]] !== undefined && a[keys[k]] !== null) { clean[keys[k]] = a[keys[k]]; }
         }
@@ -228,7 +270,33 @@
         return '在 ' + safeRange(a.range) + ' 中按「' + a.op + ' ' + a.value + '」删除了 ' +
           removed.removed + ' 行；请用表格自带的撤销恢复';
       }
-      case 'et.sort': { var rows = ET.sort(a.range, a.order); return '排序完成' + (rows ? '（' + rows + ' 行）' : ''); }
+      case 'et.textToColumns': {
+        var split = ET.textToColumns(a.range, a.delimiter);
+        return '在 ' + safeRange(a.range) + ' 中按分隔符拆开了 ' + split + ' 个单元格';
+      }
+      case 'et.findReplace': {
+        var replaced = ET.findReplace(a.range, a.find, a.replace);
+        return '在 ' + safeRange(a.range) + ' 中替换了 ' + replaced + ' 处（公式单元格未改动）';
+      }
+      case 'et.fillBlanks': {
+        var blanks = ET.fillBlanks(a.range, a.value);
+        return '填充了 ' + blanks + ' 个空白单元格';
+      }
+      case 'et.fillDown': {
+        var down = ET.fillDown(a.range);
+        return safeRange(a.range) + ' 首行公式已向下填充' + (down ? ' ' + down + ' 行' : '');
+      }
+      case 'et.mergeCells': ET.mergeCells(a.range, a.center); return safeRange(a.range) + ' 已合并；请用表格自带的撤销恢复';
+      case 'et.insertRows': ET.insertRows(a.range, a.count); return '已插入 ' + (a.count || 1) + ' 行；请用表格自带的撤销恢复';
+      case 'et.insertColumns': ET.insertColumns(a.range, a.count); return '已插入列；请用表格自带的撤销恢复';
+      case 'et.deleteColumns': ET.deleteColumns(a.range); return '已删除列；请用表格自带的撤销恢复';
+      case 'et.hideColumns': ET.hideColumns(a.range, a.hidden); return '列可见性已更新；请用表格自带的撤销恢复';
+      case 'et.dataValidation': ET.dataValidation(a.range, a.list); return safeRange(a.range) + ' 的下拉选项已设置';
+      case 'et.pageSetup': ET.pageSetup(a.range, { titleRows: a.titleRows }); return '打印区域已设置';
+      case 'et.conditionalFormatRule': ET.conditionalFormatRule(a.range, a.formula, a.color);
+        return '条件格式规则已创建';
+      case 'et.pivotTable': ET.pivotTable(a.range, a.target); return '数据透视表已创建；请用表格自带的撤销恢复';
+      case 'et.sort': { var rows = ET.sort(a.range, a.order, a.columns); return '排序完成' + (rows ? '（' + rows + ' 行）' : ''); }
       case 'et.autoFilter': ET.autoFilter(a.range); return '筛选已添加';
       case 'et.freeze': ET.freeze(a.range || 'A2'); return '窗格已冻结';
       case 'et.insertChart': ET.insertChart(a.range, a.chartType); return '图表已插入';
@@ -270,6 +338,62 @@
     return result;
   }
 
+  /* 撤回只需恢复动作真正改动的属性：改底色绝不能顺带重写整片区域的字体色 */
+  var PROPS_BY_TYPE = {
+    'et.setFormula': ['value'],
+    'et.setValue': ['value'],
+    'et.fillSeries': ['value'],
+    'et.copyTo': ['value', 'fill', 'fontColor', 'bold', 'italic', 'size', 'fontName', 'numberFormat', 'align'],
+    'et.sort': ['value'],
+    'et.fillColor': ['fill'],
+    'et.conditionalFill': ['fill'],
+    'et.fontColor': ['fontColor'],
+    'et.bold': ['bold'],
+    'et.italic': ['italic'],
+    'et.fontSize': ['size'],
+    'et.fontName': ['fontName'],
+    'et.numberFormat': ['numberFormat'],
+    'et.align': ['align'],
+    'et.border': [],
+    'et.columnWidth': ['width'],
+    'et.autoFit': ['width'],
+    'et.autoFilter': [], 'et.freeze': [], 'et.insertChart': [],
+    'et.addSheet': [], 'et.renameSheet': [],
+    'et.deleteRows': [], 'et.deleteDuplicateRows': [], 'et.deleteRowsIf': [],
+    'et.findReplace': ['value'], 'et.fillBlanks': ['value'], 'et.fillDown': ['value'],
+    'et.textToColumns': ['value'],
+    'et.mergeCells': [], 'et.insertRows': [], 'et.insertColumns': [],
+    'et.deleteColumns': [], 'et.hideColumns': [], 'et.dataValidation': [],
+    'et.pageSetup': [], 'et.conditionalFormatRule': [], 'et.pivotTable': []
+  };
+
+  function affectedProps(plan) {
+    var actions = (plan && plan.actions) || [];
+    var seen = {}, out = [], unknown = false;
+    for (var i = 0; i < actions.length; i++) {
+      var a = actions[i];
+      if (!a || riskOf(a) === 'read') { continue; }
+      var list;
+      if (a.type === 'et.clear') {
+        list = a.what === 'formats'
+          ? ['fill', 'fontColor', 'bold', 'italic', 'size', 'fontName', 'numberFormat', 'align']
+          : (a.what === 'all'
+            ? ['value', 'fill', 'fontColor', 'bold', 'italic', 'size', 'fontName', 'numberFormat', 'align']
+            : ['value']);
+      } else {
+        list = PROPS_BY_TYPE[a.type];
+      }
+      if (!list) { unknown = true; continue; }
+      /* 条件高亮带 fontColor 参数时才会碰字体色 */
+      if (a.type === 'et.conditionalFill' && a.fontColor) { list = list.concat(['fontColor']); }
+      for (var j = 0; j < list.length; j++) {
+        if (!seen[list[j]]) { seen[list[j]] = true; out.push(list[j]); }
+      }
+    }
+    /* 未知动作或没有可识别属性时退回全量恢复，宁可多读也不漏恢复 */
+    return (unknown || !out.length) ? null : out;
+  }
+
   function schemaForLLM() { return TYPE_SCHEMA.join('\n'); }
   function listTypes() {
     var arr = [];
@@ -284,6 +408,7 @@
     risk: riskOf,
     validate: validate,
     execute: execute,
+    affectedProps: affectedProps,
     hostCheck: hostCheck,
     schema: schemaForLLM,
     listTypes: listTypes

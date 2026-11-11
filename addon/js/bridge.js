@@ -76,13 +76,14 @@
       return r + g * 256 + b * 65536;
     },
     normalizeColor: function (color) {
-      var c = String(color || '').trim();
+      /* 数值 0 是 JSAPI 里合法的「自动 / 黑色」色值，不能用 || 把它丢成空串再落到兜底色 */
+      var c = (color === null || color === undefined) ? '' : String(color).trim();
       if (/^#[0-9a-f]{6}$/i.test(c)) { return c.toUpperCase(); }
       if (/^#[0-9a-f]{3}$/i.test(c)) {
         return ('#' + c[1] + c[1] + c[2] + c[2] + c[3] + c[3]).toUpperCase();
       }
-      var n = parseInt(c, 10);
-      if (isFinite(n) && n >= 0 && n <= 16777215) {
+      var n = Number(c);
+      if (c !== '' && isFinite(n) && n >= 0 && n <= 16777215 && Math.floor(n) === n) {
         var r = n % 256, g = Math.floor(n / 256) % 256, b = Math.floor(n / 65536);
         var pad = function (x) { return ('0' + x.toString(16)).slice(-2); };
         return ('#' + pad(r) + pad(g) + pad(b)).toUpperCase();
@@ -199,14 +200,16 @@
     return mode === 'bgr' ? Util.hexToBgr(hex) : Util.normalizeColor(hex);
   }
 
-  function findSheetByName(name) {
+  function findSheetByName(name, sheetsArg) {
     var app = info().app;
     if (!app || !name) { return null; }
-    var sheets = null;
-    try {
-      sheets = Util.propOrCall(app, 'Worksheets') ||
-        Util.propOrCall(app.ActiveWorkbook, 'Worksheets');
-    } catch (e) { /* 忽略 */ }
+    var sheets = sheetsArg || null;
+    if (!sheets) {
+      try {
+        sheets = Util.propOrCall(app, 'Worksheets') ||
+          Util.propOrCall(app.ActiveWorkbook, 'Worksheets');
+      } catch (e) { /* 忽略 */ }
+    }
     if (!sheets) { return null; }
     var count = Number(Util.propOrCall(sheets, 'Count')) || 0;
     var key = String(name).trim().toLowerCase();
@@ -218,7 +221,7 @@
     return null;
   }
 
-  /* 目标区域允许写成 员工信息!A2（跨表限定地址） */
+  /* 目标区域允许写成 员工信息!A2，也允许 [另一工作簿.xlsx]Sheet1!A1 跨工作簿引用 */
   function getRange(addr) {
     var raw = String(addr || '');
     var bang = raw.lastIndexOf('!');
@@ -227,7 +230,16 @@
     if (bang >= 0) {
       var name = raw.slice(0, bang).replace(/^'|'$/g, '').replace(/''/g, "'");
       target = raw.slice(bang + 1);
-      var wanted = findSheetByName(name);
+      var sheetsArg = null;
+      var ext = /^\[([^\]]+)\](.+)$/.exec(name);
+      if (ext) {
+        var books = Util.propOrCall(info().app, 'Workbooks');
+        var other = books && Util.propOrCall(books, 'Item', [ext[1]]);
+        sheetsArg = other && Util.propOrCall(other, 'Worksheets');
+        name = ext[2];
+        if (!sheetsArg) { throw new Error('未找到已打开的工作簿「' + ext[1] + '」'); }
+      }
+      var wanted = findSheetByName(name, sheetsArg);
       if (!wanted) { throw new Error('未找到工作表「' + name + '」'); }
       sheet = wanted;
     }
@@ -502,12 +514,35 @@
       return { removed: removed, range: addr };
     },
 
-    sort: function (addr, order) {
+    /* columns 可指定排序列：按 C 列、或按多列先后排序，避免永远只按第一列 */
+    sort: function (addr, order, columns) {
       addr = resolveRange(addr);
       var range = getRange(addr);
-      var keyRange = Util.propOrCall(range.Columns, 'Item', [1]) || range;
-      if (typeof range.Sort === 'function') { range.Sort(keyRange, order === 'desc' ? 2 : 1, 1); }
-      else { Util.propOrCall(range, 'Sort', [keyRange, order === 'desc' ? 2 : 1, 1]); }
+      var cols = Object.prototype.toString.call(columns) === '[object Array]' ? columns : [];
+      var desc = order === 'desc' ? 2 : 1;
+      if (!cols.length) {
+        var keyRange = Util.propOrCall(range.Columns, 'Item', [1]) || range;
+        if (typeof range.Sort === 'function') { range.Sort(keyRange, desc, 1); }
+        else { Util.propOrCall(range, 'Sort', [keyRange, desc, 1]); }
+        return 0;
+      }
+      var args = [];
+      var prefix = Util.splitSheetAddr(addr).prefix;
+      for (var i = 0; i < Math.min(cols.length, 3); i++) {
+        var letter = String(cols[i]).toUpperCase().replace(/[^A-Z]/g, '');
+        if (!letter) { continue; }
+        args.push(getRange(prefix + letter + '2'), desc);
+      }
+      if (!args.length) {
+        var fallback = Util.propOrCall(range.Columns, 'Item', [1]) || range;
+        if (typeof range.Sort === 'function') { range.Sort(fallback, desc, 1); }
+        else { Util.propOrCall(range, 'Sort', [fallback, desc, 1]); }
+        return 0;
+      }
+      while (args.length < 6) { args.push(null); }
+      args.push(1);
+      if (typeof range.Sort === 'function') { range.Sort.apply(range, args); }
+      else { Util.propOrCall(range, 'Sort', args); }
       return 0;
     },
 
@@ -618,6 +653,209 @@
       getRange(addr).Value2 = matrix;
     },
 
+    /* ---- 高频数据清洗与结构操作 ---- */
+    textToColumns: function (addr, delimiter) {
+      addr = resolveRange(addr);
+      var parts = Util.splitSheetAddr(addr);
+      var p = Util.parseA1(parts.plain);
+      if (!p) { throw new Error('分列需要明确的区域：' + addr); }
+      var sep = String(delimiter == null || delimiter === '' ? ',' : delimiter);
+      var range = getRange(addr);
+      if (typeof range.TextToColumns === 'function') {
+        range.TextToColumns(range, 1, false, false, false, false, sep);
+        return 0;
+      }
+      /* 没有 TextToColumns 接口时逐格拆分，写到该行右侧的空列里 */
+      var matrix = ET.getValues(addr);
+      var changed = 0;
+      for (var r = 0; r < matrix.length; r++) {
+        var line = matrix[r] || [];
+        for (var c = 0; c < line.length; c++) {
+          var text = String(line[c] == null ? '' : line[c]);
+          if (text.indexOf(sep) < 0) { continue; }
+          var bits = text.split(sep);
+          for (var k = 0; k < bits.length; k++) {
+            getRange(parts.prefix + Util.numToCol(p.c1 + c + k) + (p.r1 + r)).Value2 = bits[k].trim();
+          }
+          changed++;
+        }
+      }
+      return changed;
+    },
+
+    /* 逐格替换文本；公式单元格保持不动，避免把公式结果写死成常量 */
+    findReplace: function (addr, find, replacement) {
+      addr = resolveRange(addr);
+      var parts = Util.splitSheetAddr(addr);
+      var p = Util.parseA1(parts.plain);
+      if (!p) { throw new Error('查找替换需要明确的区域：' + addr); }
+      var needle = String(find == null ? '' : find);
+      if (!needle) { throw new Error('没有给出要查找的内容'); }
+      var to = String(replacement == null ? '' : replacement);
+      var matrix = ET.getValues(addr);
+      var changed = 0;
+      for (var r = 0; r < matrix.length; r++) {
+        for (var c = 0; c < matrix[r].length; c++) {
+          var v = matrix[r][c];
+          if (v === null || v === undefined) { continue; }
+          var text = String(v);
+          if (text.indexOf(needle) < 0) { continue; }
+          var one = getRange(parts.prefix + Util.numToCol(p.c1 + c) + (p.r1 + r));
+          var f = null;
+          try { f = one.Formula; } catch (e) { /* 忽略 */ }
+          if (typeof f === 'string' && f.charAt(0) === '=') { continue; }
+          one.Value2 = text.split(needle).join(to);
+          changed++;
+        }
+      }
+      return changed;
+    },
+
+    fillBlanks: function (addr, value) {
+      addr = resolveRange(addr);
+      var parts = Util.splitSheetAddr(addr);
+      var p = Util.parseA1(parts.plain);
+      if (!p) { throw new Error('填充空白需要明确的区域：' + addr); }
+      var matrix = ET.getValues(addr);
+      var filled = 0;
+      for (var r = 0; r < matrix.length; r++) {
+        for (var c = 0; c < matrix[r].length; c++) {
+          var v = matrix[r][c];
+          if (v !== null && v !== undefined && String(v).trim() !== '') { continue; }
+          getRange(parts.prefix + Util.numToCol(p.c1 + c) + (p.r1 + r)).Value2 = value;
+          filled++;
+        }
+      }
+      return filled;
+    },
+
+    fillDown: function (addr) {
+      addr = resolveRange(addr);
+      var range = getRange(addr);
+      if (typeof range.FillDown === 'function') { range.FillDown(); return 0; }
+      var parts = Util.splitSheetAddr(addr);
+      var p = Util.parseA1(parts.plain);
+      if (!p) { throw new Error('向下填充需要明确的区域：' + addr); }
+      var src = getRange(parts.prefix + Util.numToCol(p.c1) + p.r1);
+      var formula = '';
+      try { formula = String(src.Formula || ''); } catch (e) { /* 忽略 */ }
+      if (!formula) { return 0; }
+      var filled = 0;
+      for (var r = p.r1 + 1; r <= p.r2; r++) {
+        var delta = r - p.r1;
+        var shifted = formula.replace(/(\$?[A-Z]{1,3})(\$?)(\d+)/g, function (all, col, abs, row) {
+          return abs === '$' ? all : col + abs + (Number(row) + delta);
+        });
+        getRange(parts.prefix + Util.numToCol(p.c1) + r).Formula = shifted;
+        filled++;
+      }
+      return filled;
+    },
+
+    mergeCells: function (addr, center) {
+      var range = getRange(resolveRange(addr));
+      if (typeof range.Merge === 'function') { range.Merge(); }
+      else { Util.propOrCall(range, 'Merge'); }
+      if (center) { range.HorizontalAlignment = ALIGN.center; }
+    },
+
+    insertRows: function (addr, count) {
+      var range = getRange(resolveRange(addr));
+      var n = Math.max(1, Math.min(100, Number(count) || 1));
+      var row = range.EntireRow;
+      for (var i = 0; i < n; i++) {
+        if (row && typeof row.Insert === 'function') { row.Insert(); }
+        else { Util.propOrCall(row, 'Insert'); }
+      }
+    },
+
+    insertColumns: function (addr, count) {
+      var range = getRange(resolveRange(addr));
+      var n = Math.max(1, Math.min(100, Number(count) || 1));
+      var col = range.EntireColumn;
+      for (var i = 0; i < n; i++) {
+        if (col && typeof col.Insert === 'function') { col.Insert(); }
+        else { Util.propOrCall(col, 'Insert'); }
+      }
+    },
+
+    deleteColumns: function (addr) {
+      var range = getRange(resolveRange(addr));
+      var col = range.EntireColumn;
+      if (col && typeof col.Delete === 'function') { col.Delete(); }
+      else { Util.propOrCall(col, 'Delete'); }
+    },
+
+    hideColumns: function (addr, hidden) {
+      var range = getRange(resolveRange(addr));
+      var col = range.EntireColumn;
+      if (!col) { throw new Error('当前客户端不支持隐藏列'); }
+      col.Hidden = hidden !== false;
+    },
+
+    dataValidation: function (addr, list) {
+      var values = Object.prototype.toString.call(list) === '[object Array]'
+        ? list : String(list || '').split(/[,，、]/);
+      var clean = [];
+      for (var i = 0; i < values.length; i++) {
+        var v = String(values[i]).trim();
+        if (v) { clean.push(v); }
+      }
+      if (!clean.length) { throw new Error('没有给出下拉选项，请写成「设置下拉选项：是,否」'); }
+      var range = getRange(resolveRange(addr));
+      var validation = range.Validation;
+      if (!validation) { throw new Error('当前客户端不支持数据验证'); }
+      try { Util.propOrCall(validation, 'Delete'); } catch (e) { /* 忽略 */ }
+      Util.propOrCall(validation, 'Add', [3, 1, 3, '"' + clean.join(',') + '"']);
+      return clean.length;
+    },
+
+    pageSetup: function (addr, opts) {
+      opts = opts || {};
+      var parts = Util.splitSheetAddr(resolveRange(addr));
+      /* 打印区域必须设在地址指定的工作表上，不能顺手写到当前活动表 */
+      var name = String(parts.prefix || '').replace(/!$/, '').replace(/^'|'$/g, '').replace(/''/g, "'");
+      var sheet = getSheet();
+      var ext = /^\[([^\]]+)\](.+)$/.exec(name);
+      if (ext) {
+        var books = Util.propOrCall(info().app, 'Workbooks');
+        var other = books && Util.propOrCall(books, 'Item', [ext[1]]);
+        var wanted = findSheetByName(ext[2], other && Util.propOrCall(other, 'Worksheets'));
+        if (!wanted) { throw new Error('未找到已打开的工作簿「' + ext[1] + '」中的工作表'); }
+        sheet = wanted;
+      } else if (name) {
+        var found = findSheetByName(name);
+        if (!found) { throw new Error('未找到工作表「' + name + '」'); }
+        sheet = found;
+      }
+      var setup = sheet && sheet.PageSetup;
+      if (!setup) { throw new Error('当前客户端不支持页面设置'); }
+      setup.PrintArea = parts.plain;
+      if (opts.titleRows) { setup.PrintTitleRows = String(opts.titleRows); }
+    },
+
+    conditionalFormatRule: function (addr, formula, color) {
+      var range = getRange(resolveRange(addr));
+      var fc = range.FormatConditions;
+      if (!fc) { throw new Error('当前客户端不支持条件格式规则'); }
+      var added = Util.propOrCall(fc, 'Add', [2, formula]);
+      if (!added) { throw new Error('条件格式规则创建失败'); }
+      if (color) { added.Interior.Color = colorValue(Util.normalizeColor(color)); }
+    },
+
+    pivotTable: function (addr, target) {
+      var app = info().app;
+      var wb = app && app.ActiveWorkbook;
+      var caches = wb && Util.propOrCall(wb, 'PivotCaches');
+      if (!caches) { throw new Error('当前客户端未提供数据透视表接口，请在表格里手动插入'); }
+      var obj = typeof caches === 'function' ? caches.call(wb) : caches;
+      var cache = Util.propOrCall(obj, 'Create', [1, resolveRange(addr)]);
+      var created = cache && Util.propOrCall(cache, 'CreatePivotTable',
+        [resolveRange(target || '@selectionBottom'), '智能表格透视表']);
+      if (!created) { throw new Error('数据透视表创建失败，请在表格里手动插入'); }
+      return true;
+    },
+
     summary: function (addr) {
       addr = resolveRange(addr || '@selection');
       var matrix = ET.getValues(addr);
@@ -641,12 +879,15 @@
       };
     },
 
-    /* ---- 撤回快照：逐单元格记录，保证「原本无填充 / 各格底色不同」都能精确还原 ---- */
-    getState: function (addr) {
+    /* ---- 撤回快照：逐单元格记录，只读取 / 恢复本次动作实际改动的属性 ----
+     * props 为空表示兼容旧的全量模式；颜色类动作不含 fontColor，撤回底色时
+     * 就不会把整片区域的字体色重写一遍。 */
+    getState: function (addr, props) {
       addr = resolveRange(addr);
       var parts = Util.splitSheetAddr(addr);
       var p = Util.parseA1(parts.plain);
-      var state = { address: addr, live: true, cells: [] };
+      var state = { address: addr, live: true, cells: [], props: props || null };
+      function has(name) { return !props || props.indexOf(name) >= 0; }
       function read(obj, prop) {
         try {
           if (!obj) { return null; }
@@ -666,26 +907,31 @@
           var cellAddr = parts.prefix + Util.numToCol(p.c1 + c) + (p.r1 + r);
           var range = getRange(cellAddr);
           var rec = { addr: cellAddr, value: null, formula: null, style: {} };
-          try { rec.value = range.Value2; } catch (e1) { /* 忽略 */ }
-          try { rec.formula = range.Formula; } catch (e2) { /* 忽略 */ }
           try {
-            var interior = range.Interior;
-            rec.style.color = read(interior, 'Color');
-            rec.style.pattern = read(interior, 'Pattern');
+            if (has('value')) { rec.value = range.Value2; rec.formula = range.Formula; }
+          } catch (e1) { /* 忽略 */ }
+          try {
+            if (has('fill')) {
+              var interior = range.Interior;
+              rec.style.color = read(interior, 'Color');
+              rec.style.pattern = read(interior, 'Pattern');
+              if (rec.style.color !== null) { rec.style.color = Util.normalizeColor(rec.style.color); }
+            }
           } catch (e3) { /* 忽略 */ }
           try {
-            var font = range.Font;
-            rec.style.bold = read(font, 'Bold');
-            rec.style.italic = read(font, 'Italic');
-            rec.style.size = read(font, 'Size');
-            rec.style.fontColor = read(font, 'Color');
-            rec.style.fontName = read(font, 'Name');
+            if (has('fontColor') || has('bold') || has('italic') || has('size') || has('fontName')) {
+              var font = range.Font;
+              if (has('bold')) { rec.style.bold = read(font, 'Bold'); }
+              if (has('italic')) { rec.style.italic = read(font, 'Italic'); }
+              if (has('size')) { rec.style.size = read(font, 'Size'); }
+              /* 字体色保留宿主原始值：自动色 0 不能被转成一个具体的实色 */
+              if (has('fontColor')) { rec.style.fontColor = read(font, 'Color'); }
+              if (has('fontName')) { rec.style.fontName = read(font, 'Name'); }
+            }
           } catch (e4) { /* 忽略 */ }
-          rec.style.numberFormat = read(range, 'NumberFormat');
-          rec.style.align = read(range, 'HorizontalAlignment');
-          rec.style.width = read(range, 'ColumnWidth');
-          if (rec.style.color !== null) { rec.style.color = Util.normalizeColor(rec.style.color); }
-          if (rec.style.fontColor !== null) { rec.style.fontColor = Util.normalizeColor(rec.style.fontColor); }
+          try { if (has('numberFormat')) { rec.style.numberFormat = read(range, 'NumberFormat'); } } catch (e5) { /* 忽略 */ }
+          try { if (has('align')) { rec.style.align = read(range, 'HorizontalAlignment'); } } catch (e6) { /* 忽略 */ }
+          try { if (has('width')) { rec.style.width = read(range, 'ColumnWidth'); } } catch (e7) { /* 忽略 */ }
           state.cells.push(rec);
         }
       }
@@ -698,41 +944,50 @@
         try { if (state.values) { getRange(state.address).Value2 = state.values; } } catch (e) { /* 忽略 */ }
         return;
       }
+      var props = state.props || null;
+      function want(name) { return !props || props.indexOf(name) >= 0; }
       for (var i = 0; i < state.cells.length; i++) {
         var rec = state.cells[i];
         var st = rec.style || {};
         var range = getRange(rec.addr);
-        /* 先还原填充状态：原本「无填充」必须显式清掉后来加上的底色 */
-        var noFill = st.pattern === null || st.pattern === undefined ||
-          st.pattern === -4142 || st.pattern === 0;
-        try {
-          var interior = range.Interior;
-          if (noFill) {
-            try { interior.Pattern = -4142; }
-            catch (eNone) { interior.Color = colorValue('#FFFFFF'); }
-          } else {
-            interior.Pattern = st.pattern;
-            if (st.color !== null && st.color !== undefined) { interior.Color = colorValue(st.color); }
-          }
-        } catch (e2) { /* 忽略 */ }
-        try {
-          var font = range.Font;
-          if (st.bold !== null && st.bold !== undefined) { font.Bold = st.bold; }
-          if (st.italic !== null && st.italic !== undefined) { font.Italic = st.italic; }
-          if (st.size !== null && st.size !== undefined) { font.Size = st.size; }
-          if (st.fontName !== null && st.fontName !== undefined) { font.Name = st.fontName; }
-          if (st.fontColor !== null && st.fontColor !== undefined) { font.Color = colorValue(st.fontColor); }
-        } catch (e3) { /* 忽略 */ }
-        try { if (st.numberFormat !== null && st.numberFormat !== undefined) { range.NumberFormat = st.numberFormat; } } catch (e4) { /* 忽略 */ }
-        try { if (st.align !== null && st.align !== undefined) { range.HorizontalAlignment = st.align; } } catch (e5) { /* 忽略 */ }
-        try { if (st.width !== null && st.width !== undefined) { range.ColumnWidth = st.width; } } catch (e6) { /* 忽略 */ }
-        try {
-          if (typeof rec.formula === 'string' && rec.formula.charAt(0) === '=') {
-            range.Formula = rec.formula;
-          } else {
-            range.Value2 = rec.value == null ? '' : rec.value;
-          }
-        } catch (e7) { /* 忽略 */ }
+        if (want('fill')) {
+          /* 先还原填充状态：原本「无填充」必须显式清掉后来加上的底色 */
+          var noFill = st.pattern === null || st.pattern === undefined ||
+            st.pattern === -4142 || st.pattern === 0;
+          try {
+            var interior = range.Interior;
+            if (noFill) {
+              try { interior.Pattern = -4142; }
+              catch (eNone) { interior.Color = colorValue('#FFFFFF'); }
+            } else {
+              interior.Pattern = st.pattern;
+              if (st.color !== null && st.color !== undefined) { interior.Color = colorValue(st.color); }
+            }
+          } catch (e2) { /* 忽略 */ }
+        }
+        if (want('fontColor') || want('bold') || want('italic') || want('size') || want('fontName')) {
+          try {
+            var font = range.Font;
+            if (want('bold') && st.bold !== null && st.bold !== undefined) { font.Bold = st.bold; }
+            if (want('italic') && st.italic !== null && st.italic !== undefined) { font.Italic = st.italic; }
+            if (want('size') && st.size !== null && st.size !== undefined) { font.Size = st.size; }
+            if (want('fontName') && st.fontName !== null && st.fontName !== undefined) { font.Name = st.fontName; }
+            /* 原样写回，保留「自动色」语义，不经过 hex / BGR 来回转换 */
+            if (want('fontColor') && st.fontColor !== null && st.fontColor !== undefined) { font.Color = st.fontColor; }
+          } catch (e3) { /* 忽略 */ }
+        }
+        try { if (want('numberFormat') && st.numberFormat !== null && st.numberFormat !== undefined) { range.NumberFormat = st.numberFormat; } } catch (e4) { /* 忽略 */ }
+        try { if (want('align') && st.align !== null && st.align !== undefined) { range.HorizontalAlignment = st.align; } } catch (e5) { /* 忽略 */ }
+        try { if (want('width') && st.width !== null && st.width !== undefined) { range.ColumnWidth = st.width; } } catch (e6) { /* 忽略 */ }
+        if (want('value')) {
+          try {
+            if (typeof rec.formula === 'string' && rec.formula.charAt(0) === '=') {
+              range.Formula = rec.formula;
+            } else {
+              range.Value2 = rec.value == null ? '' : rec.value;
+            }
+          } catch (e7) { /* 忽略 */ }
+        }
       }
     },
 

@@ -87,6 +87,7 @@ function makeSheet(name, rows) {
   }
   const sheet = {
     Name: name, cells: cells,
+    PageSetup: {},
     UsedRange: {
       Row: 1, Column: 1,
       Rows: { Count: rows.length },
@@ -178,7 +179,12 @@ function makeSheet(name, rows) {
           const o = {};
           ['Bold', 'Italic', 'Size', 'Name', 'Color'].forEach((k) => {
             Object.defineProperty(o, k, {
-              get() { const v = cell(list[0]).style['font' + k]; return v === undefined ? null : v; },
+              get() {
+                const v = cell(list[0]).style['font' + k];
+                /* 真实 JSAPI 对未显式着色的字体色返回自动色 0 */
+                if (v === undefined && k === 'Color') { return 0; }
+                return v === undefined ? null : v;
+              },
               set(v) { for (const a of list) { cell(a).style['font' + k] = v; } }
             });
           });
@@ -193,8 +199,44 @@ function makeSheet(name, rows) {
       range.ClearFormats = function () { for (const a of list) { cell(a).style = {}; } };
       range.Clear = function () { range.ClearContents(); range.ClearFormats(); };
       range.Copy = function (dest) { dest.Value2 = range.Value2; };
-      range.EntireRow = { Delete() { if (p) { sheet.deleteRow(p.r1); } } };
-      range.Sort = function () {};
+      range.EntireRow = {
+        Delete() { if (p) { sheet.deleteRow(p.r1); } },
+        Insert() { sheet.insertedRows = (sheet.insertedRows || 0) + 1; }
+      };
+      range.EntireColumn = {
+        Insert() { sheet.insertedCols = (sheet.insertedCols || 0) + 1; },
+        Delete() { sheet.deletedCols = (sheet.deletedCols || 0) + 1; },
+        set Hidden(v) { sheet.hiddenCols = sheet.hiddenCols || {}; sheet.hiddenCols[raw] = v; },
+        get Hidden() { return (sheet.hiddenCols || {})[raw] || false; }
+      };
+      range.Merge = function () { sheet.merged = sheet.merged || []; sheet.merged.push(raw); };
+      range.FillDown = function () {
+        if (!p) { return; }
+        for (let r = p.r1 + 1; r <= p.r2; r++) {
+          for (let c = p.c1; c <= p.c2; c++) {
+            const top = cell(numToCol(c) + p.r1);
+            const dst = cell(numToCol(c) + r);
+            const delta = r - p.r1;
+            dst.value = top.value;
+            dst.formula = typeof top.formula === 'string' && top.formula.charAt(0) === '='
+              ? top.formula.replace(/(\$?[A-Z]{1,3})(\$?)(\d+)/g,
+                (all, col, abs, row) => abs === '$' ? all : col + abs + (Number(row) + delta))
+              : top.formula;
+          }
+        }
+      };
+      range.Validation = {
+        Delete() {},
+        Add(...args) { sheet.validation = { range: raw, args: args }; }
+      };
+      range.FormatConditions = {
+        Add(type, formula) {
+          sheet.formatRules = sheet.formatRules || [];
+          sheet.formatRules.push({ type: type, formula: formula });
+          return { Interior: { Color: '' } };
+        }
+      };
+      range.Sort = function () { sheet.sorted = { range: raw, args: Array.from(arguments) }; };
       range.AutoFilter = function () {};
       return range;
     },
@@ -246,6 +288,12 @@ const sheets = [
   makeSheet('宽表', [
     Array.from({ length: 25 }, (_, i) => '列' + (i + 1)),
     Array.from({ length: 25 }, (_, i) => (i === 1 ? '是' : 'x' + (i + 1)))
+  ]),
+  makeSheet('高频任务', [
+    ['姓名,城市', '分数', '备注', '状态'],
+    ['张三,北京', 80, '', '是'],
+    ['李四,上海', '', 60, '否'],
+    ['王五,北京', 90, '', '是']
   ])
 ];
 const worksheets = {
@@ -254,7 +302,21 @@ const worksheets = {
   Add() { return sheets[0]; }
 };
 app = {
-  ActiveWorkbook: { Name: '测试工作簿.xlsx' },
+  ActiveWorkbook: {
+    Name: '测试工作簿.xlsx',
+    PivotCaches() {
+      return {
+        Create() {
+          return {
+            CreatePivotTable(target, name) {
+              app.pivot = { target: target, name: name };
+              return {};
+            }
+          };
+        }
+      };
+    }
+  },
   ActiveSheet: sheets[0],
   Worksheets: worksheets,
   Selection: { Address: '$B$2:$B$11' },
@@ -431,6 +493,49 @@ const mixedTx = History.commit(mixedPlan, mixedResult, mixedBefore);
 assert(mixedTx && History.undo(mixedTx.id).ok, '混合区域填色可撤回');
 assert(sheets[0].cells.B4.style.color === '#FF0000', '撤回后原本有底色的单元格恢复原色');
 assert(!sheets[0].cells.B5.style.color, '撤回后同一区域里原本无填充的单元格恢复无填充');
+
+/* 回归：颜色类操作撤回不得把整片区域的字体色改成同一个颜色 */
+const fontSheet = sheets[0];
+fontSheet.cells.E2.style.fontBold = true;
+fontSheet.cells.E3.style.fontColor = 16711680;
+assert(Bridge.util.normalizeColor(0) === '#000000',
+  '自动色 0 不再被误判成兜底浅黄 #FFF2CC');
+assert(Bridge.et.getState('演示销售数据!E2', null).cells[0].style.fontColor === 0,
+  '模拟宿主把未显式着色的字体色报为自动色 0');
+const fillOnlyPlan = Actions.validate({
+  summary: '只改底色',
+  actions: [{ type: 'et.fillColor', range: '演示销售数据!E2:E3', color: '#FFFF00' }]
+});
+const fillProps = Actions.affectedProps(fillOnlyPlan);
+assert(fillProps.indexOf('fill') >= 0 && fillProps.indexOf('fontColor') < 0,
+  '底色动作的撤回属性只包含填充，不包含字体色');
+const fillOnlyBefore = History.capture(fillOnlyPlan);
+assert(fillOnlyBefore.ranges[0].props.indexOf('fontColor') < 0 &&
+  fillOnlyBefore.ranges[0].cells[0].style.fontColor === undefined,
+  '底色快照根本不读取字体色');
+const fillOnlyResult = Actions.execute(fillOnlyPlan);
+const fillOnlyTx = History.commit(fillOnlyPlan, fillOnlyResult, fillOnlyBefore);
+assert(fillOnlyTx && fillOnlyTx.undoable && History.undo(fillOnlyTx.id).ok, '底色操作可撤回');
+assert(fontSheet.cells.E2.style.fontColor === undefined &&
+  fontSheet.cells.E3.style.fontColor === 16711680,
+  '撤回底色后自动色与显式红色字体都保持原值，全文不会被改成同一种颜色');
+assert(fontSheet.cells.E2.style.fontBold === true && !fontSheet.cells.E2.style.color,
+  '撤回底色后加粗等字体属性不动，底色本身正确恢复为无填充');
+
+/* 字体色动作自身的撤回仍要逐格还原 */
+const fontColorPlan = Actions.validate({
+  summary: '改字体色',
+  actions: [{ type: 'et.fontColor', range: '演示销售数据!E2:E3', color: '#FF0000' }]
+});
+assert(Actions.affectedProps(fontColorPlan).indexOf('fontColor') >= 0,
+  '字体色动作的撤回属性包含字体色');
+const fontColorBefore = History.capture(fontColorPlan);
+const fontColorResult = Actions.execute(fontColorPlan);
+const fontColorTx = History.commit(fontColorPlan, fontColorResult, fontColorBefore);
+assert(fontColorTx && History.undo(fontColorTx.id).ok, '字体色操作可撤回');
+assert(fontSheet.cells.E2.style.fontColor === 0 &&
+  fontSheet.cells.E3.style.fontColor === 16711680,
+  '字体色撤回后逐格恢复自动色 0 与红色原值');
 
 /* 回归：文本条件标黄不再退化成整区域上色，且整行标色可完整撤回 */
 const condSheet = sheets[4];
@@ -665,6 +770,115 @@ assert(plannerSrc.indexOf('高亮大于 90') < 0 && plannerSrc.indexOf('计算 F
 const advisorSrc = source('addon/js/advisor.js');
 assert(advisorSrc.indexOf('"达标","未达标"') < 0 && advisorSrc.indexOf("'>60'") < 0,
   '公式顾问不再写死达标文案与 60 阈值');
+
+/* ---------------- 8.2 高频 Excel 任务回归 ---------------- */
+const taskSheet = sheets[6];
+
+assert(Advisor.advise('统计 C2:C20 中大于 60 的个数', adviseCtx).formulas[0].formula ===
+  '=COUNTIF(C2:C20,">60")', '条件计数带真实阈值，不再退化成 COUNT');
+assert(Advisor.advise('统计 A2:A20 有多少个非空单元格', adviseCtx).formulas[0].formula ===
+  '=COUNTA(A2:A20)', '非空单元格用 COUNTA，不再生成 COUNTIF(...,"")');
+assert(Advisor.advise('按条件求和：统计 B2:B20 中华东对应的 C2:C20 销售额合计', adviseCtx)
+  .formulas[0].formula.indexOf('"华东"') >= 0, 'SUMIF 条件取自指令，不再写占位符');
+const yesNo = Advisor.advise('如果 C2 大于 60 显示及格，否则显示不及格', adviseCtx).formulas[0].formula;
+assert(yesNo.indexOf('"及格"') >= 0 && yesNo.indexOf('"不及格"') >= 0,
+  'IF 返回值使用用户给的文案');
+assert(Advisor.advise('根据 Sheet2!A2:B20 查找 A2 对应的价格，放到 B2', adviseCtx)
+  .formulas[0].formula.indexOf('=VLOOKUP(A2,Sheet2!A2:B20') >= 0,
+  'VLOOKUP 用指令里的查找区域与关键字，不臆造工作表名');
+const ifErr = Advisor.advise('把 VLOOKUP 查不到的错误值显示为空', adviseCtx);
+assert(ifErr.intentKind === 'iferror' && ifErr.formulas[0].formula.indexOf('IFERROR') >= 0,
+  '错误值需求生成 IFERROR 公式');
+assert(Planner.rulePlan('把 VLOOKUP 查不到的错误值显示为空', adviseCtx).actions.length === 0 &&
+  Planner.rulePlan('多条件求和：部门为销售且金额大于 1000 的合计', adviseCtx).actions.length === 0,
+  '仍带占位说明的公式不会写进单元格');
+assert(Planner.rulePlan('把 C2:C20 四舍五入保留 2 位小数', adviseCtx)
+  .actions[0].formula.indexOf('ROUND') >= 0, '四舍五入走公式而不是数字格式');
+assert(Planner.rulePlan('对 [Book2.xlsx]Sheet1!A1:A10 求和，结果放到 B1', adviseCtx)
+  .actions[0].formula.indexOf('[Book2.xlsx]Sheet1!') >= 0, '跨工作簿引用保留工作簿名');
+assert(Planner.rulePlan('把 A1:F1 加粗并居中，底色设为黄色', adviseCtx).actions.length === 3,
+  '一句话里的加粗 / 居中 / 底色拆成 3 个动作');
+assert(Planner.rulePlan('自动调整 A:F 的列宽', adviseCtx).actions[0].type === 'et.autoFit',
+  '自动调整列宽不再退化成固定列宽');
+assert(Planner.rulePlan('在 A2:A21 生成从 1 开始的序号', adviseCtx).actions[0].type === 'et.fillSeries',
+  '「序号」识别为序列填充');
+assert(Planner.rulePlan('新建工作表「汇总」', adviseCtx).actions[0].name === '汇总',
+  '新建工作表名称从引号里提取');
+
+const frPlan = Actions.validate(Planner.rulePlan('把 高频任务!A2:A4 里的北京替换成北京市', adviseCtx));
+assert(frPlan.actions[0].type === 'et.findReplace' && frPlan.actions[0].replace === '北京市',
+  '查找替换生成结构化动作');
+assert(Actions.execute(frPlan).ok && taskSheet.cells.A2.value === '张三,北京市' &&
+  taskSheet.cells.A4.value === '王五,北京市', '查找替换真的改写了命中单元格');
+
+const fbPlan = Actions.validate(Planner.rulePlan('把 高频任务!B2:C4 的空白单元格填成 0', adviseCtx));
+assert(fbPlan.actions[0].type === 'et.fillBlanks', '空白填充生成结构化动作');
+assert(Actions.execute(fbPlan).ok && taskSheet.cells.B3.value === '0' &&
+  taskSheet.cells.C2.value === '0' && taskSheet.cells.B2.value === 80,
+  '只填空白单元格，有内容的不动');
+
+taskSheet.cells.D2.formula = '=B2*2';
+const fdPlan = Actions.validate(Planner.rulePlan('把 高频任务!D2 的公式向下填充到 D4', adviseCtx));
+assert(fdPlan.actions[0].type === 'et.fillDown' && fdPlan.actions[0].range === '高频任务!D2:D4',
+  '向下填充合成完整区域');
+assert(Actions.execute(fdPlan).ok && taskSheet.cells.D3.formula === '=B3*2' &&
+  taskSheet.cells.D4.formula === '=B4*2', '公式向下填充时相对行号正确偏移');
+
+const splitPlan = Actions.validate(Planner.rulePlan('把 高频任务!A2:A4 按逗号分列', adviseCtx));
+assert(splitPlan.actions[0].type === 'et.textToColumns' && splitPlan.actions[0].delimiter === ',',
+  '按逗号分列生成结构化动作');
+assert(Actions.execute(splitPlan).ok && taskSheet.cells.A2.value === '张三' &&
+  taskSheet.cells.B2.value === '北京市', '分列把内容写到右侧列');
+
+const mergePlan = Actions.validate(Planner.rulePlan('合并 高频任务!A1:D1 并居中', adviseCtx));
+assert(mergePlan.actions.length === 2 && mergePlan.actions.some((a) => a.type === 'et.mergeCells'),
+  '合并并居中同时产出合并与对齐动作');
+assert(Actions.execute(mergePlan).ok && (taskSheet.merged || []).indexOf('A1:D1') >= 0,
+  '合并单元格写入宿主');
+
+const sortColsPlan = Actions.validate(Planner.rulePlan('按 C 列降序排序 高频任务!A1:D4', adviseCtx));
+assert(sortColsPlan.actions[0].columns && sortColsPlan.actions[0].columns[0] === 'C',
+  '排序识别指定列');
+assert(Actions.execute(sortColsPlan).ok && taskSheet.sorted && taskSheet.sorted.args[1] === 2,
+  '指定列与降序参数传给宿主');
+
+const dvPlan = Actions.validate(Planner.rulePlan('给 高频任务!D2:D4 设置下拉选项：是,否', adviseCtx));
+assert(dvPlan.actions[0].type === 'et.dataValidation', '下拉选项生成结构化动作');
+assert(Actions.execute(dvPlan).ok && taskSheet.validation.args[3] === '"是,否"',
+  '下拉选项写入宿主');
+
+const psPlan = Actions.validate(Planner.rulePlan('设置打印区域为 高频任务!A1:D4', adviseCtx));
+assert(Actions.execute(psPlan).ok && taskSheet.PageSetup.PrintArea === 'A1:D4',
+  '打印区域写入宿主');
+
+const rulePlan = Actions.validate(Planner.rulePlan('给 高频任务!A1:D4 设置隔行底纹', adviseCtx));
+assert(rulePlan.actions[0].type === 'et.conditionalFormatRule' &&
+  rulePlan.actions[0].formula.indexOf('MOD(ROW(') >= 0, '隔行底纹生成真正的条件格式规则');
+assert(Actions.execute(rulePlan).ok && taskSheet.formatRules.length === 1,
+  '条件格式规则写入宿主');
+
+const pivotPlan = Actions.validate(Planner.rulePlan('按 高频任务!A1:D4 做数据透视表', adviseCtx));
+assert(pivotPlan.actions[0].type === 'et.pivotTable' && Actions.execute(pivotPlan).ok && app.pivot,
+  '数据透视表创建成功');
+
+const insertPlan = Actions.validate(Planner.rulePlan('在第 2 行下面插入一行', adviseCtx));
+assert(insertPlan.actions[0].type === 'et.insertRows' && insertPlan.actions[0].count === 1,
+  '插入行数不误用定位行号');
+/* 指令没写工作表名时，结构动作按表格语义作用于当前活动工作表 */
+assert(Actions.execute(insertPlan).ok && app.ActiveSheet.insertedRows === 1, '插入行写入宿主');
+const delColPlan = Actions.validate(Planner.rulePlan('删除 B 列', adviseCtx));
+assert(delColPlan.actions[0].type === 'et.deleteColumns' && Actions.execute(delColPlan).ok &&
+  app.ActiveSheet.deletedCols === 1, '删除列写入宿主');
+const hidePlan = Actions.validate(Planner.rulePlan('隐藏 C 列', adviseCtx));
+assert(hidePlan.actions[0].type === 'et.hideColumns' && Actions.execute(hidePlan).ok &&
+  app.ActiveSheet.hiddenCols && Object.keys(app.ActiveSheet.hiddenCols).length === 1,
+  '隐藏列写入宿主');
+
+assert(History.preview(insertPlan).undoable === false &&
+  History.preview(mergePlan).undoable === false, '插入行 / 合并单元格标记为需用表格自带撤销');
+assert(History.preview(frPlan).undoable === true, '查找替换仍可用快照撤回');
+assert(History.capture(frPlan).ranges[0].props.indexOf('value') >= 0,
+  '查找替换的快照只需恢复值，不会碰字体色');
 
 /* ---------------- 9. 规则引擎异步分支 ---------------- */
 setTimeout(function () {

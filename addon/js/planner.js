@@ -57,7 +57,7 @@
 
   /* 地址前面紧邻的「工作表名!」限定必须一起带走，否则跨表引用会退化成当前表 */
   function sheetPrefixBefore(text, index) {
-    var m = /(?:'[^']+'|[A-Za-z_][A-Za-z0-9_.]*|[\u4e00-\u9fa5]+)!$/.exec(String(text).slice(0, index));
+    var m = /(?:\[[^\]]+\])?(?:'[^']+'|[A-Za-z_][A-Za-z0-9_.]*|[\u4e00-\u9fa5]+)!$/.exec(String(text).slice(0, index));
     return m ? m[0] : '';
   }
 
@@ -71,6 +71,12 @@
     var colRe = /(^|[^A-Z0-9])([A-Z]{1,3})\s*列/g;
     while ((m = colRe.exec(text)) !== null) {
       out.push(sheetPrefixBefore(text, m.index + (m[1] ? m[1].length : 0)) + m[2] + '1:' + m[2] + '@lastRow');
+    }
+    /* 「自动调整 A:F 的列宽」要识别成整段列范围，而不是退回当前选区 */
+    var spanRe = /(^|[^A-Z0-9])([A-Z]{1,3})\s*:\s*([A-Z]{1,3})\s*列?/g;
+    while ((m = spanRe.exec(text)) !== null) {
+      out.push(sheetPrefixBefore(text, m.index + (m[1] ? m[1].length : 0)) +
+        m[2] + '1:' + m[3] + '@lastRow');
     }
     var rowRe = /第\s*(\d+)\s*行/g;
     while ((m = rowRe.exec(text)) !== null) { out.push(m[1] + ':' + m[1]); }
@@ -123,6 +129,16 @@
         !advice.formulas || !advice.formulas.length) { return []; }
     var formula = String(advice.formulas[0].formula || '');
     if (formula.charAt(0) !== '=') { return []; }
+    /* 公式里还留着占位说明时不要写进单元格，宁可让用户补全，也不能写入错误公式 */
+    if (/"(?:条件1?|条件2|满足条件|不满足条件)"|查找表!|@lookupRange|@区域|替换为/.test(formula)) {
+      return [];
+    }
+    /* SUMIFS / COUNTIFS 要用到「求和区 + 多个条件区」，只凭选区推断出的列不可靠。
+       公式建议模式仍给出草案，执行模式等用户把区域说清楚后再落地。 */
+    if ((advice.intentKind === 'sumifs' || advice.intentKind === 'countifs') &&
+        extractRanges(clause).length < 2) {
+      return [];
+    }
     var target = '', area = '';
     for (var i = 0; i < (advice.points || []).length; i++) {
       var p = advice.points[i];
@@ -204,45 +220,72 @@
       return actions;
     }
 
-    /* 字体格式及结构化动作先行；公式类指令留到最后，避免抢走格式 / 统计类意图 */
-    if (/加粗|粗体|取消加粗|BOLD/.test(c)) {
-      actions.push({ type: 'et.bold', range: range, value: !/取消|不要|去掉|不加/.test(clause) });
-    } else if (/斜体|ITALIC/.test(c)) {
-      actions.push({ type: 'et.italic', range: range, value: !/取消|不要|去掉/.test(clause) });
-    } else if (/字号|号字|字体大小/.test(clause)) {
-      var size = /(?:字号|号字|字体大小)\s*[:：]?\s*(\d{1,2})/.exec(clause) || /(\d{1,2})\s*(?:号字|磅)/.exec(clause);
-      actions.push({ type: 'et.fontSize', range: range, size: size ? Number(size[1]) : 14 });
-    } else if (/字体|字型/.test(clause) && /[:：为成设置]/.test(clause)) {
-      var fname = /字体\s*[:：为成设置]?\s*([\u4e00-\u9fa5A-Za-z]{2,12})/.exec(clause);
-      if (fname) { actions.push({ type: 'et.fontName', range: range, name: fname[1] }); }
-    } else if (/居中|左对齐|右对齐|对齐/.test(clause)) {
-      var align = /右对齐/.test(clause) ? 'right' : (/左对齐/.test(clause) ? 'left' : 'center');
-      actions.push({ type: 'et.align', range: range, align: align });
-    } else if (/边框|框线/.test(clause)) {
-      actions.push({ type: 'et.border', range: range });
-    } else if (/自适应|自动调整列宽/.test(clause)) {
-      actions.push({ type: 'et.autoFit', range: range });
-    } else if (/列宽|行高/.test(clause)) {
-      var width = /(\d{1,3})\s*(?:列宽|字符|像素)?/.exec(clause);
-      actions.push({ type: 'et.columnWidth', range: range, width: width ? Number(width[1]) : 18 });
-    } else if (/百分比|百分号/.test(clause)) {
-      actions.push({ type: 'et.numberFormat', range: range, format: '0.00%' });
-    } else if (/保留\s*\d+\s*位小数|\d+\s*位小数/.test(clause)) {
-      var digits = /(\d+)\s*位小数/.exec(clause);
-      var n = digits ? Math.min(6, Number(digits[1])) : 2;
-      actions.push({ type: 'et.numberFormat', range: range, format: '0.' + new Array(n + 1).join('0') });
-    } else if (/货币|金额|人民币|¥/.test(clause)) {
-      actions.push({ type: 'et.numberFormat', range: range, format: '¥#,##0.00' });
-    } else if (/千分位/.test(clause)) {
-      actions.push({ type: 'et.numberFormat', range: range, format: '#,##0' });
-    } else if (/日期格式/.test(clause)) {
-      actions.push({ type: 'et.numberFormat', range: range, format: 'yyyy-mm-dd' });
-    } else if (/字体颜色|文字颜色|字色/.test(clause) && color) {
-      actions.push({ type: 'et.fontColor', range: range, color: color });
-    } else if (/底色|背景|填充|标黄|标红|标绿|高亮|涂色|颜色/.test(clause) && color) {
-      actions.push({ type: 'et.fillColor', range: range, color: color });
+    /* 一、互斥的清洗 / 结构 / 计算动作 */
+    var wantsRound = /四舍五入|ROUND/i.test(c);
+    var replacePair =
+      /["'「『]([^"'」』]{1,20})["'」』]\s*(?:替换成|替换为|替换|改成|改为|换成)\s*["'「『]?([^"'」』\s,，。;；]{1,20})/.exec(clause) ||
+      /(?:里的|中的|中|里)\s*["'「『]?([^"'」』\s,，。;；]{1,20}?)["'」』]?\s*(?:替换成|替换为|改成|改为|换成|替换)\s*["'「『]?([^"'」』\s,，。;；]{1,20})["'」』]?/.exec(clause);
+    if (replacePair && /替换|改成|改为|换成/.test(clause)) {
+      actions.push({ type: 'et.findReplace', range: range, find: replacePair[1], replace: replacePair[2] });
+    } else if (/分列|拆分成列|按.*拆分/.test(clause)) {
+      var delimWord = /按\s*["'「『]?([^"'」』\s,，。;；]{1,6})["'」』]?\s*(?:分列|拆分)/.exec(clause);
+      var word = delimWord ? delimWord[1] : ',';
+      var delimMap = { '逗号': ',', '分号': ';', '顿号': '、', '空格': ' ', '制表符': '\t', '竖线': '|' };
+      actions.push({ type: 'et.textToColumns', range: range, delimiter: delimMap[word] || word });
+    } else if (/空白|空单元格|空值/.test(clause) && /填|补|设为/.test(clause)) {
+      var blankValue = /(?:填成|填为|填入|填|补|设为)\s*[:：]?\s*["'「『]?([^"'」』\s,，。;；]{1,20})/.exec(clause);
+      actions.push({ type: 'et.fillBlanks', range: range, value: blankValue ? blankValue[1] : '0' });
+    } else if (/向下填充|下拉填充|填充公式|公式.*下拉|往下拖/.test(clause)) {
+      /* 「把 A2 的公式向下填充到 A20」要把两个地址合成一个区域 */
+      var downRange = range;
+      if (sourceRanges.length >= 2) {
+        var one = Util.parseA1(sourceRanges[0]);
+        var two = Util.parseA1(sourceRanges[1]);
+        if (one && two && one.c1 === two.c1) {
+          var downPrefix = Util.splitSheetAddr(sourceRanges[0]).prefix;
+          downRange = downPrefix + Util.numToCol(one.c1) + Math.min(one.r1, two.r1) + ':' +
+            Util.numToCol(one.c1) + Math.max(one.r1, two.r1);
+        }
+      }
+      actions.push({ type: 'et.fillDown', range: downRange });
+    } else if (/插入.*行|在第.*行.*插入|新增.*行/.test(clause)) {
+      /* 只从「插入 N 行」取数量，不能把「第 2 行」的行号当成插入行数 */
+      var insCount = /插入\s*(\d+)\s*行/.exec(clause);
+      var insCn = /插入\s*([一两二三四五六七八九十])\s*行/.exec(clause);
+      var cnNum = { '一': 1, '两': 2, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10 };
+      var insTotal = insCount ? Number(insCount[1]) : (insCn ? (cnNum[insCn[1]] || 1) : 1);
+      actions.push({ type: 'et.insertRows', range: range, count: insTotal });
+    } else if (/插入.*列|新增.*列/.test(clause)) {
+      actions.push({ type: 'et.insertColumns', range: range, count: 1 });
+    } else if (/删除.*列|删掉.*列/.test(clause)) {
+      actions.push({ type: 'et.deleteColumns', range: range });
+    } else if (/隐藏|取消隐藏|显示.*列/.test(clause) && /列/.test(clause)) {
+      actions.push({ type: 'et.hideColumns', range: range, hidden: !/取消隐藏|取消|显示/.test(clause) });
+    } else if (/下拉选项|下拉菜单|数据验证|有效性|可选值|选项列表/.test(clause)) {
+      var opts = /(?:选项|下拉|列表)\s*[:：]\s*["'「『]?([^"'」』。;；]{1,80})/.exec(clause);
+      actions.push({ type: 'et.dataValidation', range: range,
+        list: opts ? opts[1].split(/[,，、\/|]/) : [] });
+    } else if (/打印区域|打印设置|打印标题|页面设置/.test(clause)) {
+      actions.push({ type: 'et.pageSetup', range: range,
+        titleRows: /标题行|首行/.test(clause) ? '1:1' : '' });
+    } else if (/条件格式规则|新建规则|隔行底纹|隔行填色|斑马纹/.test(clause)) {
+      var plainRange = Util.splitSheetAddr(range).plain;
+      var firstCell = String(plainRange).split(':')[0].replace(/\$/g, '').toUpperCase();
+      var rc = /(大于|小于|不小于|不大于|等于)\s*(\d+(?:\.\d+)?)/.exec(clause);
+      var opMap = { '大于': '>', '小于': '<', '不小于': '>=', '不大于': '<=', '等于': '=' };
+      var ruleFormula = rc ? '=' + firstCell + (opMap[rc[1]] || '>') + rc[2]
+        : '=MOD(ROW(' + firstCell + '),2)=0';
+      actions.push({ type: 'et.conditionalFormatRule', range: range,
+        formula: ruleFormula, color: color || '#FFFF00' });
+    } else if (/透视表|数据透视/.test(clause)) {
+      actions.push({ type: 'et.pivotTable', range: range, target: target });
     } else if (/排序|升序|降序/.test(clause)) {
-      actions.push({ type: 'et.sort', range: range, order: /降序|从大到小|倒序/.test(clause) ? 'desc' : 'asc' });
+      var sortCols = [], sc, scm = /按\s*\$?([A-Z]{1,3})\s*列/g;
+      while ((sc = scm.exec(clause)) !== null) { sortCols.push(sc[1].toUpperCase()); }
+      var sortAction = { type: 'et.sort', range: range,
+        order: /降序|从大到小|倒序/.test(clause) ? 'desc' : 'asc' };
+      if (sortCols.length || /先按|再按|然后按/.test(clause)) { sortAction.columns = sortCols; }
+      actions.push(sortAction);
     } else if (/筛选|过滤/.test(clause)) {
       actions.push({ type: 'et.autoFilter', range: range });
     } else if (/冻结/.test(clause)) {
@@ -250,7 +293,8 @@
     } else if (/图表|柱状图|折线图/.test(clause)) {
       actions.push({ type: 'et.insertChart', range: range, chartType: /折线/.test(clause) ? 'line' : 'column' });
     } else if (/新建工作表|添加工作表|新增工作表/.test(clause)) {
-      var sname = /(?:工作表|名为|叫)\s*[:：]?\s*([\u4e00-\u9fa5A-Za-z0-9]{1,16})/.exec(clause);
+      var sname = /(?:新建|添加|新增)工作表\s*[:：]?\s*[「『"']?([\u4e00-\u9fa5A-Za-z0-9]{1,16})/.exec(clause) ||
+        /(?:名为|叫)\s*[:：]?\s*[「『"']?([\u4e00-\u9fa5A-Za-z0-9]{1,16})/.exec(clause);
       actions.push({ type: 'et.addSheet', name: sname ? sname[1] : '新工作表' });
     } else if (/重命名|改名为|工作表名称/.test(clause)) {
       var rname = /(?:为|成|[:：])\s*([\u4e00-\u9fa5A-Za-z0-9]{1,16})\s*$/.exec(clause);
@@ -258,7 +302,7 @@
     } else if (/复制/.test(clause) && /到/.test(clause)) {
       var all = extractRanges(clause);
       if (all.length >= 2) { actions.push({ type: 'et.copyTo', range: all[0], target: all[1] }); }
-    } else if (/序列|自动填充|编号/.test(clause)) {
+    } else if (/序列|自动填充|编号|序号|流水号/.test(clause)) {
       var start = /从\s*(\d+)\s*开始/.exec(clause);
       var step = /步长\s*(\d+)/.exec(clause);
       actions.push({ type: 'et.fillSeries', range: range, start: start ? Number(start[1]) : 1, step: step ? Number(step[1]) : 1 });
@@ -285,13 +329,70 @@
       } else {
         actions.push({ type: 'et.summary', range: range });
       }
-    } else {
-      var value = quotedValue(clause);
-      if (value !== null && /写入|填入|输入|填写|设为|改成|改为/.test(clause)) {
-        actions.push({ type: 'et.setValue', range: range, value: value });
+    }
+
+    /* 二、格式类动作可在同一句里叠加，不再被 if/else 只取第一个 */
+    if (!actions.length) {
+      var fmt = [];
+      if (/加粗|粗体|取消加粗|BOLD/.test(c)) {
+        fmt.push({ type: 'et.bold', range: range, value: !/取消|不要|去掉|不加/.test(clause) });
+      }
+      if (/斜体|ITALIC/.test(c)) {
+        fmt.push({ type: 'et.italic', range: range, value: !/取消|不要|去掉/.test(clause) });
+      }
+      if (/字号|号字|字体大小/.test(clause)) {
+        var size = /(?:字号|号字|字体大小)\s*[:：]?\s*(\d{1,2})/.exec(clause) || /(\d{1,2})\s*(?:号字|磅)/.exec(clause);
+        fmt.push({ type: 'et.fontSize', range: range, size: size ? Number(size[1]) : 14 });
+      }
+      if (/字体|字型/.test(clause) && /[:：为成设置]/.test(clause)) {
+        var fname = /字体\s*[:：为成设置]?\s*([\u4e00-\u9fa5A-Za-z]{2,12})/.exec(clause);
+        if (fname) { fmt.push({ type: 'et.fontName', range: range, name: fname[1] }); }
+      }
+      if (/居中|左对齐|右对齐|对齐/.test(clause)) {
+        var align = /右对齐/.test(clause) ? 'right' : (/左对齐/.test(clause) ? 'left' : 'center');
+        fmt.push({ type: 'et.align', range: range, align: align });
+      }
+      if (/合并单元格|合并居中|合并\s*[^，。;；]{0,24}?\$?[A-Z]{1,3}\$?\d/.test(clause) &&
+          !/合并文本|文本合并|合并到|拼接到|连接到/.test(clause)) {
+        fmt.push({ type: 'et.mergeCells', range: range, center: /居中/.test(clause) });
+      }
+      if (/边框|框线/.test(clause)) { fmt.push({ type: 'et.border', range: range }); }
+      if (/自适应|自动调整|自动列宽/.test(clause) && /列宽|列|宽/.test(clause)) {
+        fmt.push({ type: 'et.autoFit', range: range });
+      } else if (/列宽|行高/.test(clause) && !/自适应|自动调整/.test(clause)) {
+        var width = /(?:设为|改成|调整到|宽度)\s*[:：]?\s*(\d{1,3})/.exec(clause) ||
+          /(\d{1,3})\s*(?:字符|像素|磅)/.exec(clause);
+        fmt.push({ type: 'et.columnWidth', range: range, width: width ? Number(width[1]) : 18 });
+      }
+      /* 同一句里只采用一种数字格式，避免两个动作互相覆盖 */
+      var numFmt = '';
+      if (!wantsRound && /百分比|百分号/.test(clause)) { numFmt = '0.00%'; }
+      else if (!wantsRound && /保留\s*\d+\s*位小数|\d+\s*位小数/.test(clause)) {
+        var digits = /(\d+)\s*位小数/.exec(clause);
+        var n = digits ? Math.min(6, Number(digits[1])) : 2;
+        numFmt = '0.' + new Array(n + 1).join('0');
+      } else if (/货币格式|金额格式|人民币格式|¥\s*格式|设为货币|按货币/.test(clause)) { numFmt = '¥#,##0.00'; }
+      else if (/千分位/.test(clause)) { numFmt = '#,##0'; }
+      else if (/日期格式/.test(clause)) { numFmt = 'yyyy-mm-dd'; }
+      if (numFmt) { fmt.push({ type: 'et.numberFormat', range: range, format: numFmt }); }
+      if (/字体颜色|文字颜色|字色/.test(clause) && color) {
+        fmt.push({ type: 'et.fontColor', range: range, color: color });
+      }
+      if (/底色|背景|填充|标黄|标红|标绿|高亮|涂色|颜色/.test(clause) && color &&
+          !/空白填充|向下填充|填充公式|序列填充/.test(clause)) {
+        fmt.push({ type: 'et.fillColor', range: range, color: color });
+      }
+      if (fmt.length) {
+        for (var fi0 = 0; fi0 < fmt.length; fi0++) { actions.push(fmt[fi0]); }
       } else {
-        var fromAdvice = formulaActions(clause, state.ctx, target);
-        for (var fi = 0; fi < fromAdvice.length; fi++) { actions.push(fromAdvice[fi]); }
+        /* 三、公式 / 值兜底：四舍五入这类指令走公式顾问，不再被数字格式抢走 */
+        var value = quotedValue(clause);
+        if (value !== null && /写入|填入|输入|填写|设为|改成|改为/.test(clause)) {
+          actions.push({ type: 'et.setValue', range: range, value: value });
+        } else {
+          var fromAdvice = formulaActions(clause, state.ctx, target);
+          for (var fi = 0; fi < fromAdvice.length; fi++) { actions.push(fromAdvice[fi]); }
+        }
       }
     }
 
