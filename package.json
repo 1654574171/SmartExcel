@@ -1,0 +1,19 @@
+{
+  "name": "smart-sheet-assistant",
+  "version": "1.0.0",
+  "private": true,
+  "description": "智能表格助手：侧边栏公式顾问与表格操作",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node tools/serve.js",
+    "dev": "node tools/serve.js",
+    "check": "node tools/check.js",
+    "test": "node tools/smoke.js",
+    "test:install": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/test-install.ps1",
+    "install:addon": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/install.ps1"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

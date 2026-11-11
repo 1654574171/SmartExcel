@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  本地加载项注册清单示例（仅表格组件）。
+  安装：把本文件放到 %APPDATA%\kingsoft\wps\jsaddons\publish.xml，
+  并把 addon 目录复制为 SMART_SHEET_1.0.0。
+  也可直接运行 tools/install.ps1 自动完成。
+-->
+<jsplugins>
+  <jsplugin name="SMART_SHEET" enable="enable_dev" url="file://" type="et" version="1.0.0" />
+</jsplugins>

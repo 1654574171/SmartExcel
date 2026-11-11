@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<customUI xmlns="http://schemas.microsoft.com/office/2006/01/customui" onLoad="OnAddinLoad">
+  <ribbon startFromScratch="false">
+    <tabs>
+      <tab id="tabSmartSheet" label="智能表格助手" keytip="A">
+        <group id="grpSmartSheet" label="智能表格助手">
+          <button id="btnOpenPane" label="打开侧边栏" size="large" onAction="OnAction" imageMso="HappyFace" />
+        </group>
+      </tab>
+    </tabs>
+  </ribbon>
+</customUI>
