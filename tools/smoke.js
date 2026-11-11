@@ -60,10 +60,17 @@ function numToCol(n) {
 function parseA1(addr) {
   const raw = String(addr || '').toUpperCase().replace(/\$/g, '').replace(/\s/g, '');
   const m = /^([A-Z]{1,3})(\d+)(?::([A-Z]{1,3})(\d+))?$/.exec(raw);
-  if (!m) { return null; }
-  const c1 = colToNum(m[1]), r1 = parseInt(m[2], 10);
-  const c2 = m[3] ? colToNum(m[3]) : c1, r2 = m[4] ? parseInt(m[4], 10) : r1;
-  return { c1: Math.min(c1, c2), r1: Math.min(r1, r2), c2: Math.max(c1, c2), r2: Math.max(r1, r2) };
+  if (m) {
+    const c1 = colToNum(m[1]), r1 = parseInt(m[2], 10);
+    const c2 = m[3] ? colToNum(m[3]) : c1, r2 = m[4] ? parseInt(m[4], 10) : r1;
+    return { c1: Math.min(c1, c2), r1: Math.min(r1, r2), c2: Math.max(c1, c2), r2: Math.max(r1, r2) };
+  }
+  /* 整行地址 6:6；模拟环境只需覆盖实际存在的列即可 */
+  const row = /^(\d+):(\d+)$/.exec(raw);
+  if (row) {
+    return { c1: 1, r1: parseInt(row[1], 10), c2: 2, r2: parseInt(row[2], 10) };
+  }
+  return null;
 }
 
 let app;
@@ -150,7 +157,18 @@ function makeSheet(name, rows) {
           const o = {};
           Object.defineProperty(o, 'Color', {
             get() { return cell(list[0]).style.color === undefined ? '' : cell(list[0]).style.color; },
-            set(v) { for (const a of list) { cell(a).style.color = v; } }
+            set(v) {
+              for (const a of list) { cell(a).style.color = v; cell(a).style.pattern = 1; }
+            }
+          });
+          Object.defineProperty(o, 'Pattern', {
+            get() { return cell(list[0]).style.pattern === undefined ? -4142 : cell(list[0]).style.pattern; },
+            set(v) {
+              for (const a of list) {
+                cell(a).style.pattern = v;
+                if (v === -4142) { cell(a).style.color = undefined; }
+              }
+            }
           });
           return o;
         }
@@ -175,12 +193,25 @@ function makeSheet(name, rows) {
       range.ClearFormats = function () { for (const a of list) { cell(a).style = {}; } };
       range.Clear = function () { range.ClearContents(); range.ClearFormats(); };
       range.Copy = function (dest) { dest.Value2 = range.Value2; };
-      range.EntireRow = { Delete() {} };
+      range.EntireRow = { Delete() { if (p) { sheet.deleteRow(p.r1); } } };
       range.Sort = function () {};
       range.AutoFilter = function () {};
       return range;
     },
     Activate() { app.ActiveSheet = sheet; },
+    deleteRow(row) {
+      const next = {};
+      for (const key of Object.keys(cells)) {
+        const m = /^([A-Z]{1,3})(\d+)$/.exec(key);
+        if (!m) { continue; }
+        const r = parseInt(m[2], 10);
+        if (r < row) { next[key] = cells[key]; }
+        else if (r > row) { next[m[1] + (r - 1)] = cells[key]; }
+      }
+      for (const key of Object.keys(cells)) { delete cells[key]; }
+      Object.assign(cells, next);
+      sheet.UsedRange.Rows.Count = Math.max(1, sheet.UsedRange.Rows.Count - 1);
+    },
     ChartObjects() { return { Add() { return { Chart: { SetSourceData() {} } }; } }; }
   };
   return sheet;
@@ -201,7 +232,21 @@ const sheets = [
     ['张三', 26, 4250, '技术部'], ['李四', 33, 6800, '市场部'],
     ['王五', 28, 3900, '技术部'], ['赵六', 41, 8600, '市场部'], ['钱七', 24, 2800, '技术部']
   ]),
-  makeSheet('参数表', [['条件', '阈值'], ['年龄上限', 30], ['月薪下限', 3000]])
+  makeSheet('参数表', [['条件', '阈值'], ['年龄上限', 30], ['月薪下限', 3000]]),
+  makeSheet('去重测试', [
+    ['姓名', '分数'],
+    ['张三', 80], ['李四', 90], ['张三', 80],
+    ['王五', 70], ['李四', 90], ['赵六', 60]
+  ]),
+  makeSheet('条件测试', [
+    ['姓名', '是否结婚'],
+    ['张三', '是'], ['李四', '否'], ['王五', '是'],
+    ['赵六', '否'], ['钱七', '是']
+  ]),
+  makeSheet('宽表', [
+    Array.from({ length: 25 }, (_, i) => '列' + (i + 1)),
+    Array.from({ length: 25 }, (_, i) => (i === 1 ? '是' : 'x' + (i + 1)))
+  ])
 ];
 const worksheets = {
   Count: sheets.length,
@@ -340,6 +385,100 @@ const sheetSum = Planner.rulePlan('对 Sheet1!C2:C6 求和，结果放在下面'
 assert(sheetSum.actions[0].range === 'Sheet1!C7' &&
   sheetSum.actions[0].formula === '=SUM(Sheet1!C2:C6)', '跨表求和的结果位置与公式都带工作表名');
 
+/* 回归：删除重复行是真实能力，且不能被误当成删除整个区域 */
+const dedupSheet = sheets[3];
+assert(Actions.listTypes().indexOf('et.deleteDuplicateRows') >= 0, '动作白名单包含按内容去重删除行');
+assert(Actions.schema().indexOf('et.deleteDuplicateRows') >= 0, '大模型可用动作清单包含去重删除');
+const dedupRule = Planner.rulePlan('删除 去重测试!A2:A7 中的重复行', adviseCtx);
+assert(dedupRule.actions.length === 1 && dedupRule.actions[0].type === 'et.deleteDuplicateRows',
+  '规则引擎识别「删除重复行」，不会退化成删除整个区域的 et.deleteRows');
+assert(String(dedupRule.actions[0].range).indexOf('去重测试!') >= 0, '去重动作保留工作表限定');
+const dedupPlan = Actions.validate(dedupRule);
+const dedupResult = Actions.execute(dedupPlan);
+assert(dedupResult.ok && dedupResult.succeeded === 1 && dedupResult.details[0].text.indexOf('2 行') >= 0,
+  '去重删除执行成功并删除 2 行重复数据');
+assert(dedupSheet.cells.A2.value === '张三' && dedupSheet.cells.A3.value === '李四' &&
+  dedupSheet.cells.A4.value === '王五' && dedupSheet.cells.A5.value === '赵六',
+  '重复行被删掉且保留首次出现的行，后续行正确上移');
+assert(!dedupSheet.cells.A6, '被删掉的行不再残留数据');
+assert(Actions.risk({ type: 'et.deleteDuplicateRows' }) === 'danger', '去重删除标为高风险动作');
+const dedupTx = History.commit(dedupPlan, dedupResult, History.capture(dedupPlan));
+assert(dedupTx && dedupTx.undoable === false, '结构性删除明确标记不可用快照撤回');
+
+/* 回归：撤回必须逐格还原，尤其「原本无填充」不能被留成黄色或白色实底 */
+const fillPlan = Actions.validate({
+  summary: '标黄',
+  actions: [{ type: 'et.fillColor', range: '演示销售数据!B2:B3', color: '#FFFF00' }]
+});
+const fillBefore = History.capture(fillPlan);
+const fillResult = Actions.execute(fillPlan);
+assert(fillResult.ok && sheets[0].cells.B2.style.color === '#FFFF00', '填色已写入');
+const fillTx = History.commit(fillPlan, fillResult, fillBefore);
+assert(fillTx && fillTx.undoable && History.undo(fillTx.id).ok, '填色事务可撤回');
+assert(!sheets[0].cells.B2.style.color && !sheets[0].cells.B3.style.color,
+  '撤回后原本无填充的单元格恢复为无填充，而不是留着黄色');
+assert(sheets[0].cells.B2.value === '笔记本', '撤回后单元格内容保持不变');
+
+sheets[0].cells.B4.style.color = '#FF0000';
+sheets[0].cells.B4.style.pattern = 1;
+const mixedPlan = Actions.validate({
+  summary: '混合填色',
+  actions: [{ type: 'et.fillColor', range: '演示销售数据!B4:B5', color: '#FFFF00' }]
+});
+const mixedBefore = History.capture(mixedPlan);
+const mixedResult = Actions.execute(mixedPlan);
+const mixedTx = History.commit(mixedPlan, mixedResult, mixedBefore);
+assert(mixedTx && History.undo(mixedTx.id).ok, '混合区域填色可撤回');
+assert(sheets[0].cells.B4.style.color === '#FF0000', '撤回后原本有底色的单元格恢复原色');
+assert(!sheets[0].cells.B5.style.color, '撤回后同一区域里原本无填充的单元格恢复无填充');
+
+/* 回归：文本条件标黄不再退化成整区域上色，且整行标色可完整撤回 */
+const condSheet = sheets[4];
+const condRule = Planner.rulePlan('把 条件测试!B2:B6 中为「是」的行标黄', adviseCtx);
+assert(condRule.actions[0].type === 'et.conditionalFill' && condRule.actions[0].threshold === '是' &&
+  condRule.actions[0].fillScope === 'row', '规则引擎识别文本条件标黄并标整行');
+assert(condRule.actions[0].type !== 'et.fillColor', '不会退化成给整个区域上色');
+const condFillPlan = Actions.validate(condRule);
+assert(History.preview(condFillPlan).undoable === true, '标整行仍可用快照自动撤回');
+const condFillBefore = History.capture(condFillPlan);
+const condFillResult = Actions.execute(condFillPlan);
+assert(condFillResult.ok && condFillResult.details[0].text.indexOf('3 处') >= 0, '文本条件命中 3 处');
+assert(condFillPlan.actions[0].color === '#FFFF00',
+  '规则引擎与大模型示例对「标黄」使用同一种黄色');
+assert(condSheet.cells.A2.style.color === '#FFFF00' && condSheet.cells.B2.style.color === '#FFFF00',
+  '命中行的整行被标黄');
+assert(!condSheet.cells.B3.style.color, '未命中的行没有被涂色');
+const condFillTx = History.commit(condFillPlan, condFillResult, condFillBefore);
+assert(condFillTx && condFillTx.undoable && History.undo(condFillTx.id).ok, '整行标色可撤回');
+assert(!condSheet.cells.A2.style.color && !condSheet.cells.B2.style.color,
+  '扩展快照让整行标色撤回后恢复原状');
+
+/* 回归：按文本条件删除整行 */
+const condDeletePlan = Actions.validate(Planner.rulePlan('删除 条件测试!B2:B6 中为「是」的行', adviseCtx));
+assert(condDeletePlan.actions[0].type === 'et.deleteRowsIf' && condDeletePlan.actions[0].value === '是',
+  '规则引擎识别按条件删除行');
+assert(Actions.schema().indexOf('et.deleteRowsIf') >= 0, '大模型动作清单包含按条件删除行');
+assert(History.preview(condDeletePlan).undoable === false &&
+  History.preview(condDeletePlan).reason.indexOf('按条件删除行') >= 0,
+  '执行前就提示按条件删除行不能自动撤回，界面不会给出误导性承诺');
+const condDeleteResult = Actions.execute(condDeletePlan);
+assert(condDeleteResult.ok && condDeleteResult.details[0].text.indexOf('3 行') >= 0, '按条件删除 3 行');
+assert(condSheet.cells.A2.value === '李四' && condSheet.cells.A3.value === '赵六',
+  '只删除了满足条件的行，其余行正确上移');
+
+/* 回归：宽表整行标色撤回时，第 20 列之后也不能残留底色 */
+const wideSheet = sheets[5];
+const widePlan = Actions.validate(Planner.rulePlan('把 宽表!B2:B2 中为「是」的行标黄', adviseCtx));
+assert(Bridge.et.rowLastCol('宽表!B2:B2') === 25, '整行范围按目标工作表自己的已用列数计算');
+const wideBefore = History.capture(widePlan);
+const wideResult = Actions.execute(widePlan);
+assert(wideResult.ok && wideSheet.cells.Y2.style.color === '#FFFF00',
+  '宽表第 25 列也被标为整行底色');
+const wideTx = History.commit(widePlan, wideResult, wideBefore);
+assert(wideTx && wideTx.undoable && History.undo(wideTx.id).ok, '宽表整行标色可撤回');
+assert(!wideSheet.cells.A2.style.color && !wideSheet.cells.Y2.style.color,
+  '宽表撤回后末列底色也恢复为无填充');
+
 /* ---------------- 6. 跨表定位 ---------------- */
 assert(Bridge.et.selectionRef().sheet === '演示销售数据', '选区引用记录了所属工作表');
 assert(Bridge.et.selectionAddress() === 'B2:B11', '纯地址接口保持兼容');
@@ -423,6 +562,12 @@ assert(fullPrompt.indexOf('不要臆造 Sheet1') >= 0 && fullPrompt.indexOf('不
   '提示词禁止臆造表名与照抄示例数值');
 assert(fullPrompt.indexOf('wps.') < 0 && fullPrompt.indexOf('"app":"et"') >= 0,
   '模型提示词只含表格动作 schema');
+assert(fullPrompt.indexOf('et.deleteDuplicateRows') >= 0 &&
+  fullPrompt.indexOf('不要因为风险高就返回空 actions') >= 0,
+  '提示词明确允许在用户授权删除时直接输出破坏性动作');
+assert(fullPrompt.indexOf('et.deleteRowsIf') >= 0 &&
+  fullPrompt.indexOf('不要用 et.fillColor 给整个区域上色') >= 0,
+  '提示词明确区分条件标色与整区域上色、按条件删除');
 
 Chat.saveSettings({ llmEnabled: true, apiKey: 'test-key', baseUrl: 'https://example.test/v1' });
 assert(Llm.enabled(Chat.getSettings()), '大模型通道可按设置启用');
@@ -448,6 +593,8 @@ const normalized = Llm.normalizePlan(nested);
 assert(normalized.actions.length === 1 && normalized.actions[0].type === 'et.setFormula',
   '嵌套 plan 与类型别名自动归一化到白名单');
 assert(Actions.validate(normalized).actions.length === 1, '归一化后的动作能通过白名单校验');
+assert(Llm.normalizePlan({ summary: '去重', actions: [{ type: 'removeDuplicates', range: 'A2:A7' }] })
+  .actions[0].type === 'et.deleteDuplicateRows', '模型使用 removeDuplicates 别名也能归一化');
 const bare = Llm.extractPlanObject(JSON.stringify([{ type: 'et.bold', range: 'A1', value: true }]));
 assert(Llm.normalizePlan(bare).actions.length === 1, '模型直接输出裸动作数组也能识别');
 assert(Llm.normalizePlan(Llm.extractPlanObject(JSON.stringify({
@@ -466,6 +613,21 @@ assert(retryPlan && retryPlan.source === 'llm' && retryPlan.actions.length === 1
 assert(sentBodies.length === 2, '重试只额外发出一次请求');
 assert(JSON.parse(sentBodies[1]).messages[0].content.indexOf('重试要求') >= 0,
   '重试使用更严格的提示词');
+
+/* 模型以「需要确认处理方式」返回 0 步计划时，规则引擎要能接手 */
+setModelReplies([modelContent({
+  app: 'et', summary: '当前可用动作中没有「按内容去重删除行」，需要确认处理方式',
+  actions: [], needClarify: true,
+  clarify: [
+    { label: '先读取内容再决定', prompt: '先读取内容再决定' },
+    { label: '直接删除整行', prompt: '直接删除整行' }
+  ]
+})]);
+let rescued = null;
+Planner.parse('删除 去重测试!A2:A7 中的重复行', structCtx, function (plan) { rescued = plan; });
+assert(rescued && rescued.actions.length === 1 && rescued.actions[0].type === 'et.deleteDuplicateRows',
+  '模型给 0 步澄清计划时，规则引擎自动补出可执行去重计划');
+assert(rescued.engineNote.indexOf('本地规则引擎') >= 0, '接手后说明实际使用的引擎');
 
 /* 两次都失败时给出具体原因，并降级为规则引擎但不冒充风险警告 */
 setModelReplies([

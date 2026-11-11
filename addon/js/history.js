@@ -14,6 +14,8 @@
   /* 结构性 / 视图类操作无法用区域快照可靠还原，明确提示用户改用表格自带撤销 */
   var BLOCKED = {
     'et.deleteRows': '删除行',
+    'et.deleteDuplicateRows': '按内容去重删除行',
+    'et.deleteRowsIf': '按条件删除行',
     'et.addSheet': '新建工作表',
     'et.renameSheet': '重命名工作表',
     'et.insertChart': '插入图表',
@@ -25,13 +27,30 @@
     return 'tx' + Date.now().toString(36) + Math.random().toString(36).substring(2, 7);
   }
 
+  /* 标整行时实际影响的是 A..末列，快照范围必须同步扩大才能撤回干净 */
+  function wideRangeOf(action) {
+    if (!action || action.type !== 'et.conditionalFill' || action.fillScope !== 'row' || !action.range) {
+      return null;
+    }
+    try {
+      var addr = String(Bridge.et.resolve(action.range));
+      var parts = Bridge.util.splitSheetAddr(addr);
+      var p = Bridge.util.parseA1(parts.plain);
+      if (!p) { return null; }
+      var lastCol = Math.max(p.c2, Number(Bridge.et.rowLastCol(addr)) || 1);
+      return parts.prefix + 'A' + p.r1 + ':' + Bridge.util.numToCol(lastCol) + p.r2;
+    } catch (e) { return null; }
+  }
+
   function rangesOf(plan) {
     var seen = {};
     var list = [];
     for (var i = 0; i < plan.actions.length; i++) {
       var a = plan.actions[i];
       var keys = [];
-      if (a.range) { keys.push(a.range); }
+      var wide = wideRangeOf(a);
+      if (wide) { keys.push(wide); }
+      else if (a.range) { keys.push(a.range); }
       if (a.target) { keys.push(a.target); }
       for (var j = 0; j < keys.length; j++) {
         var addr;
@@ -42,6 +61,27 @@
     return list;
   }
 
+  function blockedOf(plan) {
+    var names = [];
+    var actions = (plan && plan.actions) || [];
+    for (var i = 0; i < actions.length; i++) {
+      var a = actions[i];
+      if (Actions.risk(a) === 'read') { continue; }
+      if (BLOCKED[a.type]) { names.push(BLOCKED[a.type]); }
+    }
+    return names;
+  }
+
+  function reasonOf(names) {
+    return '含无法自动撤回的操作（' + names.join('、') + '），请用表格的 Ctrl+Z';
+  }
+
+  /* 执行前就能告诉用户这条计划能不能自动撤回，避免给出误导性的「可撤回」承诺 */
+  function preview(plan) {
+    var blocked = blockedOf(plan);
+    return { undoable: blocked.length === 0, reason: blocked.length ? reasonOf(blocked) : '' };
+  }
+
   function capture(plan) {
     var info = Bridge.info();
     var before = {
@@ -49,17 +89,14 @@
       undoable: true, reason: '', noop: false
     };
     var writes = 0;
-    var blocked = [];
     for (var i = 0; i < plan.actions.length; i++) {
-      var a = plan.actions[i];
-      if (Actions.risk(a) === 'read') { continue; }
-      writes++;
-      if (BLOCKED[a.type]) { blocked.push(BLOCKED[a.type]); }
+      if (Actions.risk(plan.actions[i]) !== 'read') { writes++; }
     }
     if (!writes) { before.noop = true; return before; }
+    var blocked = blockedOf(plan);
     if (blocked.length) {
       before.undoable = false;
-      before.reason = '含无法自动撤回的操作（' + blocked.join('、') + '），请用表格的 Ctrl+Z';
+      before.reason = reasonOf(blocked);
       return before;
     }
     try {
@@ -167,7 +204,7 @@
   function clear() { stack = []; }
 
   global.WpsAIHistory = {
-    capture: capture, commit: commit, undo: undo, redo: redo,
+    capture: capture, preview: preview, commit: commit, undo: undo, redo: redo,
     undoLast: undoLast, redoLast: redoLast,
     list: list, find: find, clear: clear, max: MAX
   };

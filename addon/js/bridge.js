@@ -329,6 +329,69 @@
     return s;
   }
 
+  /* 条件匹配既支持数值比较，也支持「是 / 否」这类文本值 */
+  function matchCell(value, op, threshold) {
+    if (value === null || value === undefined) { return false; }
+    var raw = String(value).trim();
+    var wanted = (threshold === null || threshold === undefined) ? '' : String(threshold).trim();
+    var numeric = Util.isNumber(value) && wanted !== '' && Util.isNumber(threshold);
+    var n = numeric ? Util.toNumber(value) : NaN;
+    var t = numeric ? Util.toNumber(threshold) : NaN;
+    switch (op) {
+      case '>': return numeric && n > t;
+      case '>=': return numeric && n >= t;
+      case '<': return numeric && n < t;
+      case '<=': return numeric && n <= t;
+      case '=': case '==': case '等于':
+        return numeric ? n === t : raw.toLowerCase() === wanted.toLowerCase();
+      case '!=': case '<>': case '不等于':
+        return numeric ? n !== t : raw.toLowerCase() !== wanted.toLowerCase();
+      case 'contains': case '包含':
+        return wanted !== '' && raw.toLowerCase().indexOf(wanted.toLowerCase()) >= 0;
+      default: return false;
+    }
+  }
+
+  /* 找出满足条件的行号；条件区域可指定只按某一列判断 */
+  function matchedRows(addr, op, threshold, keyColumn) {
+    var parts = Util.splitSheetAddr(addr);
+    var p = Util.parseA1(parts.plain);
+    if (!p) { throw new Error('条件操作需要明确的区域：' + addr); }
+    var matrix = ET.getValues(addr);
+    var colIndex = -1;
+    if (keyColumn) {
+      colIndex = /^\d+$/.test(String(keyColumn))
+        ? Number(keyColumn) - 1
+        : Util.colToNum(keyColumn) - p.c1;
+    }
+    var rows = [];
+    for (var r = 0; r < matrix.length; r++) {
+      var cells = matrix[r] || [];
+      var hit = false;
+      if (colIndex >= 0) { hit = matchCell(cells[colIndex], op, threshold); }
+      else {
+        for (var c = 0; c < cells.length; c++) {
+          if (matchCell(cells[c], op, threshold)) { hit = true; break; }
+        }
+      }
+      if (hit) { rows.push(p.r1 + r); }
+    }
+    return { parts: parts, p: p, rows: rows };
+  }
+
+  /* 从下往上删除整行，避免前面删行导致后面的行号偏移 */
+  function deleteRowsByNumbers(parts, rowNumbers) {
+    var sorted = rowNumbers.slice().sort(function (a, b) { return b - a; });
+    var seen = {}, removed = 0;
+    for (var i = 0; i < sorted.length; i++) {
+      if (seen[sorted[i]]) { continue; }
+      seen[sorted[i]] = 1;
+      ET.deleteRows(parts.prefix + sorted[i] + ':' + sorted[i]);
+      removed++;
+    }
+    return removed;
+  }
+
   var ET = {
     expand: expand,
     resolve: resolveRange,
@@ -390,36 +453,53 @@
       else { Util.propOrCall(range, 'ClearContents'); }
     },
 
-    conditionalFill: function (addr, op, threshold, color, fontColor) {
+    /* 整行标色的末列按目标工作表自己的已用区域算；撤回快照复用它，避免宽表残留底色 */
+    rowLastCol: function (addr) {
+      var parts = Util.splitSheetAddr(String(addr || ''));
+      var name = parts.prefix ? parts.prefix.slice(0, -1).replace(/^'|'$/g, '').replace(/''/g, "'") : '';
+      var sheet = name ? findSheetByName(name) : getSheet();
+      var used = sheet && sheet.UsedRange;
+      if (used) {
+        var firstCol = Number(Util.propOrCall(used, 'Column')) || 1;
+        var count = Number(Util.propOrCall(Util.propOrCall(used, 'Columns'), 'Count')) || 1;
+        return Math.max(1, firstCol + count - 1);
+      }
+      return Math.max(1, Number(info().lastCol) || 1);
+    },
+
+    conditionalFill: function (addr, op, threshold, color, fontColor, opts) {
+      opts = opts || {};
       addr = resolveRange(addr);
       var parts = Util.splitSheetAddr(addr);
       var matrix = ET.getValues(addr);
       var p = Util.parseA1(parts.plain);
       /* 解析失败时明确报错，绝不回退到 A1 起点把颜色写到错误的位置 */
       if (!p) { throw new Error('条件高亮需要明确的区域：' + addr); }
+      var scope = opts.fillScope === 'row' ? 'row' : 'cell';
+      var lastCol = Math.max(p.c2, ET.rowLastCol(addr));
       var matched = 0;
       for (var r = 0; r < matrix.length; r++) {
         for (var c = 0; c < matrix[r].length; c++) {
-          var v = matrix[r][c];
-          if (!Util.isNumber(v)) { continue; }
-          var n = Util.toNumber(v);
-          var hit = false;
-          if (op === '>') { hit = n > threshold; }
-          else if (op === '>=') { hit = n >= threshold; }
-          else if (op === '<') { hit = n < threshold; }
-          else if (op === '<=') { hit = n <= threshold; }
-          else if (op === '=' || op === '==') { hit = n === threshold; }
-          else if (op === '!=') { hit = n !== threshold; }
-          if (hit) {
-            /* 单个单元格也要带上原来的工作表前缀，否则会标到当前活动表 */
-            var cellAddr = parts.prefix + Util.numToCol(p.c1 + c) + (p.r1 + r);
-            ET.setFill(cellAddr, color);
-            if (fontColor) { ET.setFont(cellAddr, { color: fontColor }); }
-            matched++;
-          }
+          if (!matchCell(matrix[r][c], op, threshold)) { continue; }
+          var row = p.r1 + r;
+          /* 单个单元格 / 整行都要带上原来的工作表前缀，否则会标到当前活动表 */
+          var target = scope === 'row'
+            ? parts.prefix + 'A' + row + ':' + Util.numToCol(lastCol) + row
+            : parts.prefix + Util.numToCol(p.c1 + c) + row;
+          ET.setFill(target, color);
+          if (fontColor) { ET.setFont(target, { color: fontColor }); }
+          matched++;
         }
       }
       return matched;
+    },
+
+    /* 按条件删除整行：内容等于「是」、大于某数值等都能用 */
+    deleteRowsIf: function (addr, op, value, keyColumn) {
+      addr = resolveRange(addr);
+      var hit = matchedRows(addr, op, value, keyColumn);
+      var removed = deleteRowsByNumbers(hit.parts, hit.rows);
+      return { removed: removed, range: addr };
     },
 
     sort: function (addr, order) {
@@ -477,6 +557,46 @@
       else { Util.propOrCall(range.EntireRow, 'Delete'); }
     },
 
+    /* 按内容删除重复行：区域可跨表，可按某列或整行比较，从下往上删避免行号偏移 */
+    deleteDuplicateRows: function (addr, opts) {
+      opts = opts || {};
+      addr = resolveRange(addr);
+      var parts = Util.splitSheetAddr(addr);
+      var p = Util.parseA1(parts.plain);
+      if (!p) { throw new Error('去重删除需要明确的区域：' + addr); }
+      var matrix = ET.getValues(addr);
+      var keepLast = opts.keep === 'last';
+      var colIndex = -1;
+      if (opts.keyColumn) {
+        colIndex = /^\d+$/.test(String(opts.keyColumn))
+          ? Number(opts.keyColumn) - 1
+          : Util.colToNum(opts.keyColumn) - p.c1;
+      }
+      function keyOf(row) {
+        var cells = matrix[row] || [];
+        if (colIndex >= 0) {
+          return String(cells[colIndex] == null ? '' : cells[colIndex]).trim();
+        }
+        var partsOfRow = [];
+        for (var i = 0; i < cells.length; i++) {
+          partsOfRow.push(String(cells[i] == null ? '' : cells[i]).trim());
+        }
+        return partsOfRow.join('\u0001');
+      }
+      var seen = {}, dupRows = [], order = [];
+      for (var r = 0; r < matrix.length; r++) { order.push(r); }
+      if (keepLast) { order.reverse(); }
+      for (var j = 0; j < order.length; j++) {
+        var idx = order[j];
+        var key = keyOf(idx);
+        if (!key) { continue; }
+        if (seen[key]) { dupRows.push(p.r1 + idx); }
+        else { seen[key] = 1; }
+      }
+      var removed = deleteRowsByNumbers(parts, dupRows);
+      return { removed: removed, kept: matrix.length - removed, range: addr };
+    },
+
     copyTo: function (addr, target) {
       getRange(resolveRange(addr)).Copy(getRange(resolveRange(target)));
     },
@@ -521,72 +641,99 @@
       };
     },
 
-    /* ---- 撤回快照 ---- */
+    /* ---- 撤回快照：逐单元格记录，保证「原本无填充 / 各格底色不同」都能精确还原 ---- */
     getState: function (addr) {
       addr = resolveRange(addr);
-      var state = { address: addr, live: true, cells: null, values: null, formulas: null, style: null };
-      var range = getRange(addr);
+      var parts = Util.splitSheetAddr(addr);
+      var p = Util.parseA1(parts.plain);
+      var state = { address: addr, live: true, cells: [] };
       function read(obj, prop) {
         try {
           if (!obj) { return null; }
           var v = obj[prop];
-          return (v === undefined || v === null) ? null : v;
+          return (v === undefined || v === null || v === '') ? null : v;
         } catch (e) { return null; }
       }
-      state.values = Util.toMatrix(range.Value2);
-      try { state.formulas = Util.toMatrix(range.Formula); } catch (e2) { state.formulas = state.values; }
-      var interior = null, font = null;
-      try { interior = range.Interior; } catch (e3) { /* 忽略 */ }
-      try { font = range.Font; } catch (e4) { /* 忽略 */ }
-      state.style = {
-        color: read(interior, 'Color'),
-        bold: read(font, 'Bold'), italic: read(font, 'Italic'), size: read(font, 'Size'),
-        fontColor: read(font, 'Color'), fontName: read(font, 'Name'),
-        numberFormat: read(range, 'NumberFormat'),
-        align: read(range, 'HorizontalAlignment'),
-        width: read(range, 'ColumnWidth')
-      };
-      if (state.style.color !== null) { state.style.color = Util.normalizeColor(state.style.color); }
-      if (state.style.fontColor !== null) { state.style.fontColor = Util.normalizeColor(state.style.fontColor); }
+      if (!p) {
+        state.values = Util.toMatrix(getRange(addr).Value2);
+        return state;
+      }
+      var rows = Math.min(p.r2 - p.r1 + 1, 200);
+      /* 与整行标色的实际写入列数对齐，撤回时不能只还原前 20 列 */
+      var cols = Math.min(p.c2 - p.c1 + 1, 256);
+      for (var r = 0; r < rows; r++) {
+        for (var c = 0; c < cols; c++) {
+          var cellAddr = parts.prefix + Util.numToCol(p.c1 + c) + (p.r1 + r);
+          var range = getRange(cellAddr);
+          var rec = { addr: cellAddr, value: null, formula: null, style: {} };
+          try { rec.value = range.Value2; } catch (e1) { /* 忽略 */ }
+          try { rec.formula = range.Formula; } catch (e2) { /* 忽略 */ }
+          try {
+            var interior = range.Interior;
+            rec.style.color = read(interior, 'Color');
+            rec.style.pattern = read(interior, 'Pattern');
+          } catch (e3) { /* 忽略 */ }
+          try {
+            var font = range.Font;
+            rec.style.bold = read(font, 'Bold');
+            rec.style.italic = read(font, 'Italic');
+            rec.style.size = read(font, 'Size');
+            rec.style.fontColor = read(font, 'Color');
+            rec.style.fontName = read(font, 'Name');
+          } catch (e4) { /* 忽略 */ }
+          rec.style.numberFormat = read(range, 'NumberFormat');
+          rec.style.align = read(range, 'HorizontalAlignment');
+          rec.style.width = read(range, 'ColumnWidth');
+          if (rec.style.color !== null) { rec.style.color = Util.normalizeColor(rec.style.color); }
+          if (rec.style.fontColor !== null) { rec.style.fontColor = Util.normalizeColor(rec.style.fontColor); }
+          state.cells.push(rec);
+        }
+      }
       return state;
     },
 
     setState: function (state) {
       if (!state || !state.address) { return; }
-      var addr = state.address;
-      var range = getRange(addr);
-      if (state.values) { range.Value2 = state.values; }
-      var formulas = state.formulas || state.values;
-      var stateParts = Util.splitSheetAddr(addr);
-      var p = Util.parseA1(stateParts.plain);
-      if (p && formulas) {
-        var rows = Math.min(p.r2 - p.r1 + 1, 500);
-        var cols = Math.min(p.c2 - p.c1 + 1, 60);
-        for (var r = 0; r < rows; r++) {
-          for (var c = 0; c < cols; c++) {
-            var f = formulas[r] && formulas[r][c];
-            if (typeof f === 'string' && f.charAt(0) === '=') {
-              try { getRange(stateParts.prefix + Util.numToCol(p.c1 + c) + (p.r1 + r)).Formula = f; } catch (e) { /* 忽略 */ }
-            }
-          }
-        }
+      if (!state.cells || !state.cells.length) {
+        try { if (state.values) { getRange(state.address).Value2 = state.values; } } catch (e) { /* 忽略 */ }
+        return;
       }
-      var st = state.style || {};
-      try {
-        var interior = range.Interior;
-        if (st.color !== null && st.color !== undefined) { interior.Color = colorValue(st.color); }
-      } catch (e2) { /* 忽略 */ }
-      try {
-        var font = range.Font;
-        if (st.bold !== null && st.bold !== undefined) { font.Bold = st.bold; }
-        if (st.italic !== null && st.italic !== undefined) { font.Italic = st.italic; }
-        if (st.size !== null && st.size !== undefined) { font.Size = st.size; }
-        if (st.fontName !== null && st.fontName !== undefined) { font.Name = st.fontName; }
-        if (st.fontColor !== null && st.fontColor !== undefined) { font.Color = colorValue(st.fontColor); }
-      } catch (e3) { /* 忽略 */ }
-      try { if (st.numberFormat !== null && st.numberFormat !== undefined) { range.NumberFormat = st.numberFormat; } } catch (e4) { /* 忽略 */ }
-      try { if (st.align !== null && st.align !== undefined) { range.HorizontalAlignment = st.align; } } catch (e5) { /* 忽略 */ }
-      try { if (st.width !== null && st.width !== undefined) { range.ColumnWidth = st.width; } } catch (e6) { /* 忽略 */ }
+      for (var i = 0; i < state.cells.length; i++) {
+        var rec = state.cells[i];
+        var st = rec.style || {};
+        var range = getRange(rec.addr);
+        /* 先还原填充状态：原本「无填充」必须显式清掉后来加上的底色 */
+        var noFill = st.pattern === null || st.pattern === undefined ||
+          st.pattern === -4142 || st.pattern === 0;
+        try {
+          var interior = range.Interior;
+          if (noFill) {
+            try { interior.Pattern = -4142; }
+            catch (eNone) { interior.Color = colorValue('#FFFFFF'); }
+          } else {
+            interior.Pattern = st.pattern;
+            if (st.color !== null && st.color !== undefined) { interior.Color = colorValue(st.color); }
+          }
+        } catch (e2) { /* 忽略 */ }
+        try {
+          var font = range.Font;
+          if (st.bold !== null && st.bold !== undefined) { font.Bold = st.bold; }
+          if (st.italic !== null && st.italic !== undefined) { font.Italic = st.italic; }
+          if (st.size !== null && st.size !== undefined) { font.Size = st.size; }
+          if (st.fontName !== null && st.fontName !== undefined) { font.Name = st.fontName; }
+          if (st.fontColor !== null && st.fontColor !== undefined) { font.Color = colorValue(st.fontColor); }
+        } catch (e3) { /* 忽略 */ }
+        try { if (st.numberFormat !== null && st.numberFormat !== undefined) { range.NumberFormat = st.numberFormat; } } catch (e4) { /* 忽略 */ }
+        try { if (st.align !== null && st.align !== undefined) { range.HorizontalAlignment = st.align; } } catch (e5) { /* 忽略 */ }
+        try { if (st.width !== null && st.width !== undefined) { range.ColumnWidth = st.width; } } catch (e6) { /* 忽略 */ }
+        try {
+          if (typeof rec.formula === 'string' && rec.formula.charAt(0) === '=') {
+            range.Formula = rec.formula;
+          } else {
+            range.Value2 = rec.value == null ? '' : rec.value;
+          }
+        } catch (e7) { /* 忽略 */ }
+      }
     },
 
     /* ---- 多区域引用：读取当前选区（含工作表）/ 在表格中定位高亮 ---- */

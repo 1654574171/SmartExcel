@@ -34,7 +34,9 @@
     'et.copyTo': { app: 'et', risk: 'write', label: '复制区域' },
     'et.fillSeries': { app: 'et', risk: 'write', label: '序列填充' },
     'et.clear': { app: 'et', risk: 'danger', label: '清空区域' },
-    'et.deleteRows': { app: 'et', risk: 'danger', label: '删除行' }
+    'et.deleteRows': { app: 'et', risk: 'danger', label: '删除行' },
+    'et.deleteDuplicateRows': { app: 'et', risk: 'danger', label: '按内容去重删除行' },
+    'et.deleteRowsIf': { app: 'et', risk: 'danger', label: '按条件删除行' }
   };
 
   var TYPE_SCHEMA = [
@@ -53,7 +55,7 @@
     'et.border {range} 添加全部边框',
     'et.columnWidth {range, width:number}',
     'et.autoFit {range} 自适应列宽',
-    'et.conditionalFill {range, op:">"|">="|"<"|"<="|"="|"!=", threshold:number, color, fontColor?} 按条件高亮单元格',
+    'et.conditionalFill {range, op:">"|">="|"<"|"<="|"="|"!="|"contains", threshold:number|string, color, fontColor?, fillScope:"cell"|"row"} 只给满足条件的单元格或整行上色，文本条件如 threshold:"是"',
     'et.sort {range, order:"asc"|"desc"}',
     'et.autoFilter {range}',
     'et.freeze {range} 冻结窗格',
@@ -63,7 +65,9 @@
     'et.copyTo {range, target}',
     'et.fillSeries {range, start:number, step:number}',
     'et.clear {range, what:"contents"|"formats"|"all"}',
-    'et.deleteRows {range}'
+    'et.deleteRows {range} 删除指定区域所在的整行',
+    'et.deleteDuplicateRows {range, keyColumn?, keep:"first"|"last"} 按内容删除重复行；用户明确要求去重 / 删除重复行时直接使用，不要因为破坏性就返回空 actions',
+    'et.deleteRowsIf {range, op:"="|"!="|">"|">="|"<"|"<="|"contains", value:number|string, keyColumn?} 按条件删除整行，如把 D2:D6 中内容为「是」的行删除'
   ];
 
   function safeRange(range) {
@@ -89,7 +93,8 @@
       case 'et.border': return '给 ' + r + ' 添加边框';
       case 'et.columnWidth': return '把 ' + r + ' 列宽设为 ' + a.width;
       case 'et.autoFit': return '让 ' + r + ' 列宽自适应';
-      case 'et.conditionalFill': return '把 ' + r + ' 中 ' + a.op + ' ' + a.threshold + ' 的单元格标为 ' + a.color;
+      case 'et.conditionalFill': return '只把 ' + r + ' 中「' + a.op + ' ' + a.threshold + '」' +
+        (a.fillScope === 'row' ? '的单元格所在整行' : '的单元格') + '标为 ' + a.color + '，其余单元格不动';
       case 'et.sort': return '对 ' + r + (a.order === 'desc' ? ' 降序' : ' 升序') + '排序';
       case 'et.autoFilter': return '为 ' + r + ' 添加筛选';
       case 'et.freeze': return '按 ' + r + ' 冻结窗格';
@@ -100,6 +105,12 @@
       case 'et.fillSeries': return '在 ' + r + ' 填充序列（起始 ' + a.start + '，步长 ' + a.step + '）';
       case 'et.clear': return '清空 ' + r + (a.what === 'formats' ? ' 的格式' : a.what === 'all' ? ' 的内容和格式' : ' 的内容');
       case 'et.deleteRows': return '删除 ' + r + ' 所在的行';
+      case 'et.deleteDuplicateRows': return '在 ' + r + ' 中按' +
+        (a.keyColumn ? '「' + a.keyColumn + '」列' : '整行内容') + '比对，删除重复行（保留' +
+        (a.keep === 'last' ? '最后' : '首次') + '出现）；会删除整行，影响范围外的列也会随之上移';
+      case 'et.deleteRowsIf': return '删除 ' + r + ' 中「' + a.op + ' ' + a.value + '」' +
+        (a.keyColumn ? '（按 ' + a.keyColumn + ' 列判断）' : '') +
+        '的单元格所在整行；会删除整行，影响范围外的列也会随之上移';
       default: return '未知操作 ' + a.type;
     }
   }
@@ -134,7 +145,8 @@
         var clean = { type: a.type };
         var keys = ['range', 'target', 'color', 'fontColor', 'formula', 'value', 'text', 'name', 'size',
           'format', 'align', 'width', 'op', 'threshold', 'find', 'replace', 'rows', 'cols', 'data',
-          'what', 'order', 'chartType', 'start', 'step', 'position', 'level', 'topic', 'draft', 'items', 'bold', 'italic'];
+          'what', 'order', 'chartType', 'start', 'step', 'position', 'level', 'topic', 'draft', 'items', 'bold', 'italic',
+          'keyColumn', 'keep', 'fillScope'];
         for (var k = 0; k < keys.length; k++) {
           if (a[keys[k]] !== undefined && a[keys[k]] !== null) { clean[keys[k]] = a[keys[k]]; }
         }
@@ -205,8 +217,16 @@
       case 'et.columnWidth': ET.setFormat(a.range, { width: Number(a.width) || 12 }); return safeRange(a.range) + ' 列宽已更新';
       case 'et.autoFit': ET.setFormat(a.range, { autoFit: true }); return safeRange(a.range) + ' 列宽已自适应';
       case 'et.conditionalFill': {
-        var n = ET.conditionalFill(a.range, a.op, Number(a.threshold), a.color, a.fontColor);
-        return '符合条件 ' + a.op + ' ' + a.threshold + ' 的单元格共 ' + n + ' 个，已标记';
+        /* 阈值可能是「是」这类文本，不能强制转成数字 */
+        var n = ET.conditionalFill(a.range, a.op, a.threshold, a.color, a.fontColor,
+          { fillScope: a.fillScope });
+        return '符合条件 ' + a.op + ' ' + a.threshold + ' 的共 ' + n +
+          (a.fillScope === 'row' ? ' 处，已标记（整行）' : ' 个单元格，已标记（仅命中单元格）');
+      }
+      case 'et.deleteRowsIf': {
+        var removed = ET.deleteRowsIf(a.range, a.op, a.value, a.keyColumn);
+        return '在 ' + safeRange(a.range) + ' 中按「' + a.op + ' ' + a.value + '」删除了 ' +
+          removed.removed + ' 行；请用表格自带的撤销恢复';
       }
       case 'et.sort': { var rows = ET.sort(a.range, a.order); return '排序完成' + (rows ? '（' + rows + ' 行）' : ''); }
       case 'et.autoFilter': ET.autoFilter(a.range); return '筛选已添加';
@@ -218,6 +238,11 @@
       case 'et.fillSeries': ET.fillSeries(a.range, a.start, a.step); return '序列已填充';
       case 'et.clear': ET.clear(a.range, a.what || 'contents'); return safeRange(a.range) + ' 已清空';
       case 'et.deleteRows': ET.deleteRows(a.range); return '行已删除';
+      case 'et.deleteDuplicateRows': {
+        var dedup = ET.deleteDuplicateRows(a.range, { keyColumn: a.keyColumn, keep: a.keep || 'first' });
+        return '在 ' + safeRange(a.range) + ' 中删除了 ' + dedup.removed + ' 行重复数据，保留 ' +
+          dedup.kept + ' 行；整行已删除，请用表格自带的撤销恢复';
+      }
       default: throw new Error('未实现的操作：' + a.type);
     }
   }

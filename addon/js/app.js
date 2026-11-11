@@ -315,11 +315,16 @@
       html += '</div></div>';
     }
 
+    var undoHint = '未连接真实表格，暂时无法执行';
+    if (connected()) {
+      var pv = History.preview(p);
+      undoHint = pv.undoable ? '执行前会采集快照，可撤回' : pv.reason;
+    }
     html += '<div class="plan-actions">' +
       (p.actions.length
         ? '<button class="primary-btn" data-act="run-plan" data-mid="' + esc(m.id) + '">执行这 ' + p.actions.length + ' 步</button>'
         : '') +
-      '<span class="note-mini">' + (connected() ? '执行前会采集快照，可撤回' : '未连接真实表格，暂时无法执行') + '</span></div>';
+      '<span class="note-mini">' + esc(undoHint) + '</span></div>';
     return html + '</div>';
   }
 
@@ -336,10 +341,15 @@
     html += '</ul>';
     if (m.txId) {
       var tx = History.find(m.txId);
+      var canUndo = !!(tx && tx.undoable);
       html += '<div class="result-actions">' +
-        '<button class="ghost-btn undo-btn" data-act="undo-tx" data-mid="' + esc(m.id) + '">撤回本次操作</button>' +
-        '<button class="ghost-btn undo-btn" data-act="redo-tx" data-mid="' + esc(m.id) + '">重做</button>' +
-        '<span class="note-mini">' + esc(tx && !tx.undoable ? tx.reason : '快照仅在当前面板有效') + '</span></div>';
+        (canUndo
+          ? '<button class="ghost-btn undo-btn" data-act="undo-tx" data-mid="' + esc(m.id) + '">撤回本次操作</button>' +
+            '<button class="ghost-btn undo-btn" data-act="redo-tx" data-mid="' + esc(m.id) + '">重做</button>' +
+            '<span class="note-mini">快照仅在当前面板有效</span>'
+          : '<span class="note-mini">' +
+            esc(tx && tx.reason ? tx.reason : '该操作记录已失效，无法自动撤回，请用表格的 Ctrl+Z') + '</span>') +
+        '</div>';
     }
     return html + '</div>';
   }
@@ -350,7 +360,7 @@
         '<ul class="intro-list">' +
         '<li>例如「对当前选区求和，结果放在选区下方」「把大于 90 的单元格标黄」「表头加粗居中」「统计当前选区」</li>' +
         '<li>每步都会写明操作对象与区域，含删除 / 清空等高风险动作会单独标注</li>' +
-        '<li>执行前自动采集区域快照，可在结果卡片或设置里的「操作历史」撤回 / 重做</li>' +
+        '<li>执行前自动采集区域快照，可在结果卡片或设置里的「操作历史」撤回 / 重做；删除整行等结构性操作需用表格自带撤销</li>' +
         '<li>在左侧表格选中区域点「使用选区」，可跨工作表一直加多个引用，点引用块切表定位</li>' +
         '<li>没有连接真实表格时仍能查看计划，但不会写入任何内容</li>' +
         '</ul>';

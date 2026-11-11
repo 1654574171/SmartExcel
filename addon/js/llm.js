@@ -49,6 +49,8 @@
       '4. 下面的示例只说明输出格式，其中的数字、地址、颜色不得照抄到实际计划里。',
       '5. 只生成下面【可用动作】列出的 type，不要生成文字文档类动作。',
       '6. 占位符：@selection 当前选区、@selectionBottom 选区下方一行、@lastRow 数据末行、@lastRowPlus1 末行下一行。',
+      '7. 破坏性动作（et.deleteRows、et.deleteDuplicateRows、et.deleteRowsIf、et.clear）在用户明确说删除 / 去重 / 清空时直接输出对应动作，不要因为风险高就返回空 actions 或 needClarify；删除重复行用 et.deleteDuplicateRows，不要用 et.deleteRows 删掉整个区域。',
+      '8. 有条件的操作要用条件动作：内容等于「是」的行标黄用 et.conditionalFill（threshold:"是"，fillScope:"row" 表示标整行），把内容为「是」的行删除用 et.deleteRowsIf；不要用 et.fillColor 给整个区域上色，也不要以「没有该动作」为由返回空 actions。',
       '',
       '【可用动作】',
       global.WpsAIActions.schema(),
@@ -105,12 +107,22 @@
   }
 
   /* 模型常把类型写成 setFormula / et.set_formula / 带空格，统一映射到白名单 */
+  var TYPE_ALIAS = {
+    removeduplicates: 'et.deleteDuplicateRows',
+    deletedupes: 'et.deleteDuplicateRows',
+    deduplicaterows: 'et.deleteDuplicateRows',
+    dedupe: 'et.deleteDuplicateRows',
+    deleterowsmatching: 'et.deleteRowsIf',
+    deleterowsbycondition: 'et.deleteRowsIf',
+    conditionaldelete: 'et.deleteRowsIf'
+  };
   function canonicalType(type) {
     var meta = global.WpsAIActions.meta;
     var t = String(type || '').trim();
     if (meta[t]) { return t; }
     if (t.slice(0, 3) !== 'et.' && meta['et.' + t]) { return 'et.' + t; }
     var key = t.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (TYPE_ALIAS[key]) { return TYPE_ALIAS[key]; }
     for (var k in meta) {
       if (Object.prototype.hasOwnProperty.call(meta, k) &&
           k.toLowerCase().replace(/[^a-z0-9]/g, '') === key) { return k; }

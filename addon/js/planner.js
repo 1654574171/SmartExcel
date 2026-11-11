@@ -13,7 +13,8 @@
   var COLOR_WORDS = [
     [/深红|暗红/, '#C00000'],
     [/标红|红色|红底|浅红|警示|异常|不合格|标红/, '#FFC7CE'],
-    [/标黄|黄色|黄底|高亮|浅黄|突出/, '#FFF2CC'],
+    [/浅黄/, '#FFF2CC'],
+    [/标黄|黄色|黄底|高亮|突出/, '#FFFF00'],
     [/标绿|绿色|绿底|浅绿|达标|合格/, '#C6EFCE'],
     [/蓝色|蓝底|浅蓝|标蓝/, '#DDEBF7'],
     [/橙色|橙底|橘色/, '#FCE4D6'],
@@ -171,8 +172,34 @@
       actions.push({
         type: 'et.conditionalFill', range: range, op: cond,
         threshold: Number(condNum[1]), color: color,
+        fillScope: /整行|的行/.test(clause) ? 'row' : 'cell',
         fontColor: color === '#FFC7CE' ? RED_FONT : (color === '#C6EFCE' ? GREEN_FONT : '')
       });
+      state.currentRef = range;
+      return actions;
+    }
+
+    /* 「为『是』的行标黄 / 删除」这类文本条件，必须抢在整区域填色和普通删除行之前 */
+    var wantsDelete = /(删除|删掉|去掉|去除|清除|清理|剔除)/.test(clause);
+    var textCond = /(?:为|是|等于|内容是|值为|标记为)\s*[:：]?\s*["'「『]?([^"'」』\s,，。;；]{1,12})["'」』]?\s*(?:的|，|,)/.exec(clause) ||
+      /["'「『]([^"'」』]{1,12})["'」』]\s*的/.exec(clause);
+    if (textCond) {
+      if (wantsDelete) {
+        actions.push({ type: 'et.deleteRowsIf', range: range, op: '=', value: textCond[1] });
+        state.currentRef = range;
+        return actions;
+      }
+      if (color) {
+        actions.push({
+          type: 'et.conditionalFill', range: range, op: '=', threshold: textCond[1], color: color,
+          fillScope: /整行|的行/.test(clause) ? 'row' : 'cell'
+        });
+        state.currentRef = range;
+        return actions;
+      }
+    }
+    if (cond && condNum && wantsDelete && !/重复|去重/.test(clause)) {
+      actions.push({ type: 'et.deleteRowsIf', range: range, op: cond, value: Number(condNum[1]) });
       state.currentRef = range;
       return actions;
     }
@@ -235,6 +262,17 @@
       var start = /从\s*(\d+)\s*开始/.exec(clause);
       var step = /步长\s*(\d+)/.exec(clause);
       actions.push({ type: 'et.fillSeries', range: range, start: start ? Number(start[1]) : 1, step: step ? Number(step[1]) : 1 });
+    } else if (/(删除|删掉|去掉|去除|清除|清理|去重|剔除)/.test(clause) &&
+               /(重复|去重|相同|不重复)/.test(clause)) {
+      /* 必须放在「删除…行」之前，否则会被误当成删除整个区域 */
+      var keyByCol = /(?:按|根据|以)\s*\$?([A-Z]{1,3})\s*列/.exec(clause) ||
+        /(?:按|根据|以)\s*第\s*(\d+)\s*列/.exec(clause);
+      var dedupAction = {
+        type: 'et.deleteDuplicateRows', range: range,
+        keep: /保留最后|最后一次|保留后/.test(clause) ? 'last' : 'first'
+      };
+      if (keyByCol) { dedupAction.keyColumn = keyByCol[1]; }
+      actions.push(dedupAction);
     } else if (/删除.*行|删掉.*行/.test(clause)) {
       actions.push({ type: 'et.deleteRows', range: range });
     } else if (/清空|清除内容|清除格式|清除全部/.test(clause)) {
@@ -385,7 +423,19 @@
     var settings = global.WpsAIChat.getSettings();
     if (global.WpsAILlm.enabled(settings)) {
       global.WpsAILlm.parse(text, ctx, settings, function (plan, error) {
-        if (plan) { done(plan); return; }
+        if (plan) {
+          /* 模型说「需要确认」而规则引擎能确定时，优先给出可执行计划，别把用户卡在 0 步卡片上 */
+          if (!plan.actions || !plan.actions.length) {
+            var byRule = rulePlan(text, ctx);
+            if (byRule.actions.length) {
+              byRule.engineNote = '模型没能给出可执行动作，已用本地规则引擎生成计划';
+              done(byRule);
+              return;
+            }
+          }
+          done(plan);
+          return;
+        }
         var fallback = rulePlan(text, ctx);
         /* 模型失败只是引擎降级，不算计划本身的风险，单独放在说明里而不是刺眼的警告条 */
         fallback.engineNote = '模型未返回结果（' + error + '），已自动用本地规则引擎生成计划';

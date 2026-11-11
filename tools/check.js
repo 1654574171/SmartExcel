@@ -106,6 +106,33 @@ if (/"达标","未达标"|'>60'/.test(advisorSource)) {
 if (llmSource.indexOf('sheetNames') < 0 || llmSource.indexOf('attempt(true)') < 0) {
   errors.push('大模型通道缺少真实表格上下文或空动作重试');
 }
+const actionsSource = read('addon/js/actions.js');
+if (actionsSource.indexOf('et.deleteDuplicateRows') < 0 ||
+    bridgeSource.indexOf('deleteDuplicateRows:') < 0) {
+  errors.push('按内容去重删除行未同时接入动作白名单与桥接层');
+}
+const dedupIdx = plannerSource.indexOf("type: 'et.deleteDuplicateRows'");
+const plainDeleteIdx = plannerSource.indexOf("type: 'et.deleteRows'");
+if (dedupIdx < 0 || plainDeleteIdx < dedupIdx) {
+  errors.push('去重删除分支必须排在普通删除行之前，避免把重复行误删成整个区域');
+}
+
+/* 条件动作、整行标色与撤回链路必须四处一致，缺一处就会出现「撤回不回原样」 */
+const historySource = read('addon/js/history.js');
+if (actionsSource.indexOf('et.deleteRowsIf') < 0 || bridgeSource.indexOf('deleteRowsIf:') < 0 ||
+    historySource.indexOf("'et.deleteRowsIf'") < 0) {
+  errors.push('按条件删除行未同时接入动作白名单、桥接层与撤回限制');
+}
+if (actionsSource.indexOf('fillScope') < 0 || bridgeSource.indexOf("opts.fillScope === 'row'") < 0 ||
+    historySource.indexOf('wideRangeOf') < 0) {
+  errors.push('标整行时快照范围未同步扩展，撤回会留下残留底色');
+}
+if (bridgeSource.indexOf('state.cells') < 0 || bridgeSource.indexOf('-4142') < 0) {
+  errors.push('桥接层缺少逐单元格快照或「无填充」状态恢复');
+}
+if (appSource.indexOf('History.preview') < 0 || appSource.indexOf('canUndo') < 0) {
+  errors.push('界面未提前提示不可撤回的计划，或仍对不可撤回事务显示撤回按钮');
+}
 
 const ribbon = read('addon/ribbon.xml');
 if (!/onAction="OnAction"/.test(ribbon)) { errors.push('ribbon.xml 缺少 OnAction 回调'); }
